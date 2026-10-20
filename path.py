@@ -1,48 +1,259 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Thu Sep 21 11:44:32 2023
+"""Projected RRT planner for a rigid bimanual grasp."""
 
-@author: stonneau
-"""
-
-import pinocchio as pin
-import numpy as np
-from numpy.linalg import pinv
-
-from config import LEFT_HAND, RIGHT_HAND
+from dataclasses import dataclass
 import time
 
-#returns a collision free path from qinit to qgoal under grasping constraints
-#the path is expressed as a list of configurations
-def computepath(qinit,qgoal,cubeplacementq0, cubeplacementqgoal):
-    #TODO
-    return [qinit, qgoal]
-    pass
+import numpy as np
+import pinocchio as pin
+
+from inverse_geometry import computeqgrasppose, display_grasp, _cube_hook_target
+from tools import collision, setcubeplacement
+from tools import jointlimitsviolated
+from config import LEFT_HAND, RIGHT_HAND, LEFT_HOOK, RIGHT_HOOK, EPSILON
 
 
-def displaypath(robot,path,dt,viz):
+@dataclass
+class _Node:
+    """One RRT node: its cube pose, grasping robot pose, and parent index."""
+
+    cube_pose: pin.SE3
+    q: np.ndarray
+    parent: int | None
+
+
+def _interpolate_pose(start, end, alpha):
+    """Interpolate a full SE(3) cube pose rather than only its translation."""
+    displacement = pin.log6(start.inverse() * end).vector
+    return start * pin.exp6(displacement * alpha)
+
+
+def _cube_distance(first, second):
+    """Use metres plus a small rotation penalty as the RRT distance metric."""
+    translation = np.linalg.norm(first.translation - second.translation)
+    rotation = np.linalg.norm(pin.log3(first.rotation.T @ second.rotation))
+    return translation + 0.10 * rotation
+
+
+def _project_segment(robot, cube, q_start, cube_start, cube_end, step=0.025):
+    """Project a cube-space edge onto valid grasping configurations.
+
+    Each intermediate point is re-solved using the preceding solution as its
+    seed.  Consequently every returned configuration satisfies the bimanual
+    grasp constraint; ordinary joint-space linear interpolation would not.
+    """
+    distance = _cube_distance(cube_start, cube_end)
+    samples = max(1, int(np.ceil(distance / step)))
+    path, q_previous = [], q_start
+
+    for index in range(1, samples + 1):
+        target = _interpolate_pose(cube_start, cube_end, index / samples)
+        q_next, success = computeqgrasppose(robot, q_previous, cube, target)
+        if not success or collision(robot, q_next):
+            return path, False
+        path.append(q_next)
+        q_previous = q_next
+    return path, True
+
+
+def _sample_cube_pose(rng, start, goal):
+    """Sample the useful portion of the tabletop, with clearance around ends."""
+    lo = np.minimum(start.translation, goal.translation) - np.array([0.20, 0.25, 0.0])
+    hi = np.maximum(start.translation, goal.translation) + np.array([0.20, 0.25, 0.0])
+    # Include clearance above the table: a height-only obstacle cannot be
+    # traversed if every random sample is restricted to tabletop height.
+    translation = np.array([
+        rng.uniform(max(0.18, lo[0]), min(0.65, hi[0])),
+        rng.uniform(max(-0.55, lo[1]), min(0.45, hi[1])),
+        rng.uniform(min(start.translation[2], goal.translation[2]),
+                    max(start.translation[2], goal.translation[2]) + 0.20),
+    ])
+    rotation = _interpolate_pose(start, goal, rng.uniform()).rotation
+    return pin.SE3(rotation, translation)
+
+
+def _finish_at_goal(robot, cube, path, qgoal, goal_pose):
+    """Connect the IK branch to the requested exact endpoint, or reject it.
+
+    Equivalent grasps can have different torso/elbow postures. For a nearby
+    endpoint, explicitly check a finely sampled connecting segment for both
+    hook alignment and collision; never silently return another configuration.
+    """
+    setcubeplacement(robot, cube, goal_pose)
+    count = max(1, int(np.ceil(np.max(np.abs(qgoal - path[-1])) / 0.005)))
+    tail = []
+    targets = [(robot.model.getFrameId(hand), _cube_hook_target(cube, goal_pose, hook))
+               for hand, hook in ((LEFT_HAND, LEFT_HOOK), (RIGHT_HAND, RIGHT_HOOK))]
+    for alpha in np.linspace(0., 1., count + 1)[1:]:
+        q = (1 - alpha) * path[-1] + alpha * qgoal
+        pin.framesForwardKinematics(robot.model, robot.data, q)
+        if jointlimitsviolated(robot, q) or collision(robot, q):
+            return None
+        if any(np.linalg.norm(pin.log6(robot.data.oMf[fid].inverse() * target).vector)
+               > 5 * EPSILON for fid, target in targets):
+            return None
+        tail.append(q)
+    tail[-1] = np.asarray(qgoal).copy()
+    return path + tail
+
+
+def _trace_to_root(nodes, node_index):
+    """Recover RRT node indices in start-to-goal order."""
+    indices = []
+    while node_index is not None:
+        indices.append(node_index)
+        node_index = nodes[node_index].parent
+    return list(reversed(indices))
+
+
+def _try_clearance_route(robot, cube, qinit, cube_start, cube_goal):
+    """Try a simple, collision-aware lift-carry-lower motion first.
+
+    In the supplied scene the fixed obstacle is a low bar. Sampling only at
+    tabletop height makes RRT spend most of its time proposing colliding edges;
+    lifting the cube above the bar is both natural and a useful deterministic
+    connection attempt. Different clearances are tried because an excessively
+    high lift can exceed the robot's workspace.
+    """
+    for clearance in (0.18, 0.15, 0.20):
+        start_above = pin.SE3(
+            cube_start.rotation, cube_start.translation + np.array([0.0, 0.0, clearance])
+        )
+        goal_above = pin.SE3(
+            cube_goal.rotation, cube_goal.translation + np.array([0.0, 0.0, clearance])
+        )
+        lift, lift_ok = _project_segment(robot, cube, qinit, cube_start, start_above)
+        if not lift_ok:
+            continue
+        carry, carry_ok = _project_segment(robot, cube, lift[-1], start_above, goal_above)
+        if not carry_ok:
+            continue
+        lower, lower_ok = _project_segment(robot, cube, carry[-1], goal_above, cube_goal)
+        if lower_ok:
+            return [qinit] + lift + carry + lower
+    return None
+
+
+def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal, robot=None, cube=None):
+    """Return a collision-free, grasp-preserving path from ``qinit`` to ``qgoal``.
+
+    The four required positional arguments preserve the supplied coursework
+    API.  ``robot`` and ``cube`` are optional dependency-injection arguments so
+    callers that already have a scene do not need to create a second one.
+    """
+    if robot is None or cube is None:
+        from setup_pinocchio import setuppinocchio
+        robot, _, _, cube = setuppinocchio()
+
+    qinit, qgoal = np.asarray(qinit, dtype=float), np.asarray(qgoal, dtype=float)
+    setcubeplacement(robot, cube, cubeplacementq0)
+    if collision(robot, qinit):
+        raise ValueError("qinit is in collision; compute a valid grasp before planning")
+    setcubeplacement(robot, cube, cubeplacementqgoal)
+    if collision(robot, qgoal):
+        raise ValueError("qgoal is in collision; compute a valid grasp before planning")
+
+    # Always test the cheap direct edge first.  It is common for nearby,
+    # perturbed placements and avoids RRT randomness when it is already valid.
+    direct_path, direct_ok = _project_segment(
+        robot, cube, qinit, cubeplacementq0, cubeplacementqgoal
+    )
+    if direct_ok:
+        completed = _finish_at_goal(robot, cube, [qinit] + direct_path, qgoal, cubeplacementqgoal)
+        if completed is not None:
+            return completed
+
+    # The coursework obstacle can be cleared by carrying the cube over it.
+    # This is attempted before random exploration so the standard scene is
+    # repeatable and fast, while RRT remains available for perturbed layouts.
+    clearance_path = _try_clearance_route(
+        robot, cube, qinit, cubeplacementq0, cubeplacementqgoal
+    )
+    if clearance_path is not None:
+        completed = _finish_at_goal(robot, cube, clearance_path, qgoal, cubeplacementqgoal)
+        if completed is not None:
+            return completed
+
+    nodes = [_Node(cubeplacementq0, qinit, None)]
+    rng = np.random.default_rng(2026)  # reproducible runs are easier to assess
+    max_iterations, step_length = 500, 0.075
+
+    for iteration in range(max_iterations):
+        # Goal bias accelerates connection around the obstacle. This bounded
+        # sampler is heuristic; it does not guarantee a solution in all scenes.
+        sample = cubeplacementqgoal if iteration % 8 == 0 else _sample_cube_pose(
+            rng, cubeplacementq0, cubeplacementqgoal
+        )
+        nearest_index = min(
+            range(len(nodes)), key=lambda i: _cube_distance(nodes[i].cube_pose, sample)
+        )
+        nearest = nodes[nearest_index]
+        distance = _cube_distance(nearest.cube_pose, sample)
+        alpha = min(1.0, step_length / max(distance, 1e-12))
+        candidate_pose = _interpolate_pose(nearest.cube_pose, sample, alpha)
+        edge, edge_ok = _project_segment(
+            robot, cube, nearest.q, nearest.cube_pose, candidate_pose
+        )
+        if not edge_ok:
+            continue
+
+        nodes.append(_Node(candidate_pose, edge[-1], nearest_index))
+        newest_index = len(nodes) - 1
+        if _cube_distance(candidate_pose, cubeplacementqgoal) > step_length:
+            continue
+
+        final_edge, final_ok = _project_segment(
+            robot, cube, edge[-1], candidate_pose, cubeplacementqgoal
+        )
+        if not final_ok:
+            continue
+
+        chain = _trace_to_root(nodes, newest_index)
+        result = [qinit]
+        for parent_index, child_index in zip(chain[:-1], chain[1:]):
+            partial, valid = _project_segment(
+                robot,
+                cube,
+                nodes[parent_index].q,
+                nodes[parent_index].cube_pose,
+                nodes[child_index].cube_pose,
+            )
+            if not valid:  # Defensive: protects against mutable-scene mistakes.
+                raise RuntimeError("RRT edge could not be reconstructed")
+            result.extend(partial)
+        result.extend(final_edge)
+        completed = _finish_at_goal(robot, cube, result, qgoal, cubeplacementqgoal)
+        if completed is not None:
+            return completed
+
+    raise RuntimeError("RRT could not find a valid path within 500 expansions")
+
+
+def displaypath(robot, path, dt, viz, cube=None):
+    """Replay a validated path; pass cube to animate its rigid grasp too.
+
+    The optional argument preserves the original robot-only display API.
+    Each frame recomputes the cube pose, so replay starts correctly even when
+    planning or a previous animation left the scene at the goal.
+    """
     for q in path:
-        viz.display(q)
+        if cube is None:
+            viz.display(q)
+        else:
+            display_grasp(robot, cube, q, viz)
         time.sleep(dt)
 
 
 if __name__ == "__main__":
-    from tools import setupwithmeshcat
     from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
-    from inverse_geometry import computeqgrasppose
-    
+    from viewer import setupwithmeshcat
+
     robot, cube, viz = setupwithmeshcat()
-    
-    
-    q = robot.q0.copy()
-    q0,successinit = computeqgrasppose(robot, q, cube, CUBE_PLACEMENT, viz)
-    qe,successend = computeqgrasppose(robot, q, cube, CUBE_PLACEMENT_TARGET,  viz)
-    
-    if not(successinit and successend):
-        print ("error: invalid initial or end configuration")
-    
-    path = computepath(q0,qe,CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET)
-    
-    displaypath(robot,path,dt=0.5,viz=viz) #you ll probably want to lower dt
+    q0, initial_ok = computeqgrasppose(robot, robot.q0, cube, CUBE_PLACEMENT, viz)
+    qe, final_ok = computeqgrasppose(robot, q0, cube, CUBE_PLACEMENT_TARGET, viz)
+    if not (initial_ok and final_ok):
+        raise RuntimeError("Cannot plan because one grasping configuration failed")
+    path = computepath(q0, qe, CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET, robot, cube)
+    print(f"planned {len(path)} grasping configurations")
+    displaypath(robot, path, dt=0.05, viz=viz, cube=cube)
     

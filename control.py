@@ -1,66 +1,131 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Sep  6 15:32:51 2023
-
-@author: stonneau
-"""
+"""Time parametrisation and inverse-dynamics torque control for CW2."""
 
 import numpy as np
+import pinocchio as pin
 
-from bezier import Bezier
-    
-# in my solution these gains were good enough for all joints but you might want to tune this.
-Kp = 300.               # proportional gain (P of PD)
-Kv = 2 * np.sqrt(Kp)   # derivative gain (D of PD)
+from config import LEFT_HAND, LEFT_HOOK, RIGHT_HAND, RIGHT_HOOK
+
+
+Kp = 300.0
+Kv = 2.0 * np.sqrt(Kp)
+SQUEEZE_FORCE = 8.0  # N per hand, maintained through physical contact
+MAX_TORQUE = 180.0
+
+
+class PiecewiseQuinticTrajectory:
+    """A C2 trajectory that follows every configuration in a planned path.
+
+    A fifth-order smooth-step has zero velocity and acceleration at both ends.
+    Joining one curve per path edge therefore creates a C2 trajectory with a
+    deliberate pause at each RRT waypoint, which is conservative but robust in
+    the contact simulator.
+    """
+
+    def __init__(self, path, max_joint_speed=0.40):
+        if len(path) < 2:
+            raise ValueError("a trajectory needs at least two configurations")
+        self.path = [np.asarray(q, dtype=float).copy() for q in path]
+        changes = [np.max(np.abs(b - a)) for a, b in zip(self.path[:-1], self.path[1:])]
+        if max_joint_speed <= 0:
+            raise ValueError("max_joint_speed must be positive")
+        # Quintic smoothstep reaches a peak slope of 1.875, not 1.
+        self.durations = np.maximum(0.45, 1.875 * np.asarray(changes) / max_joint_speed)
+        self.breakpoints = np.concatenate(([0.0], np.cumsum(self.durations)))
+        self.duration = float(self.breakpoints[-1])
+
+    def _segment(self, t):
+        t = float(np.clip(t, 0.0, self.duration))
+        index = min(np.searchsorted(self.breakpoints, t, side="right") - 1, len(self.durations) - 1)
+        local_time = t - self.breakpoints[index]
+        return index, np.clip(local_time / self.durations[index], 0.0, 1.0)
+
+    def evaluate(self, t):
+        """Return desired position, velocity and acceleration at time ``t``."""
+        index, s = self._segment(t)
+        delta = self.path[index + 1] - self.path[index]
+        duration = self.durations[index]
+        blend = 10 * s**3 - 15 * s**4 + 6 * s**5
+        blend_dot = (30 * s**2 - 60 * s**3 + 30 * s**4) / duration
+        blend_ddot = (60 * s - 180 * s**2 + 120 * s**3) / duration**2
+        return (
+            self.path[index] + blend * delta,
+            blend_dot * delta,
+            blend_ddot * delta,
+        )
+
+
+def _reference_at(trajs, tcurrent):
+    """Accept this solution's trajectory or the starter tuple of Bezier curves."""
+    if hasattr(trajs, "evaluate"):
+        return trajs.evaluate(tcurrent)
+    return tuple(trajectory(tcurrent) for trajectory in trajs)
+
+
+def _world_cube_hook(cube, hook_name, cube_placement):
+    """Use the static URDF hook offset with the cube's simulated world pose."""
+    pin.framesForwardKinematics(cube.model, cube.data, cube.q0)
+    hook_in_cube = cube.data.oMf[cube.model.getFrameId(hook_name)]
+    return cube_placement * hook_in_cube
+
+
+def _grasp_wrench_torque(sim, robot, cube, q, vq):
+    """Squeeze opposing faces and support weight through hand joint torques.
+
+    A spring aimed at the exact hook gives zero force when aligned, so it
+    cannot maintain a friction grasp. A small inward force supplies preload.
+    Forces are applied ONLY to robot joints; the cube moves through contacts.
+    """
+    position, quaternion = sim.p.getBasePositionAndOrientation(sim.cubeId)
+    cube_placement = pin.XYZQUATToSE3(np.asarray([*position, *quaternion]))
+    mass = sum(sim.p.getDynamicsInfo(sim.cubeId, i)[0]
+               for i in range(-1, sim.p.getNumJoints(sim.cubeId)))
+    pin.computeJointJacobians(robot.model, robot.data, q)
+    pin.framesForwardKinematics(robot.model, robot.data, q)
+
+    total = np.zeros(robot.model.nv)
+    for hand_name, sign in ((LEFT_HAND, -1), (RIGHT_HAND, 1)):
+        frame_id = robot.model.getFrameId(hand_name)
+        jacobian = pin.getFrameJacobian(
+            robot.model, robot.data, frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+        )
+        force = sign * SQUEEZE_FORCE * cube_placement.rotation[:, 1]
+        force += np.array([0., 0., mass * 9.81 / 2])
+        # Pinocchio's spatial Jacobian order is linear then angular, so this
+        # is a pure Cartesian force with no artificial moment.
+        total += jacobian.T @ np.concatenate((force, np.zeros(3)))
+    return total
+
 
 def controllaw(sim, robot, trajs, tcurrent, cube):
+    """Run one computed-torque control step and advance Bullet by one tick."""
     q, vq = sim.getpybulletstate()
-    #TODO 
-    torques = [0.0 for _ in sim.bulletCtrlJointsInPinOrder]
-    sim.step(torques)
+    q_desired, v_desired, a_desired = _reference_at(trajs, tcurrent)
 
-if __name__ == "__main__":
-        
-    from tools import setupwithpybullet, setupwithpybulletandmeshcat, rununtil
-    from config import DT
-    
-    robot, sim, cube = setupwithpybullet()
-    
-    
-    from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET    
+    # Inverse dynamics converts the desired closed-loop acceleration into a
+    # torque command.  nle includes gravity, Coriolis and centrifugal terms.
+    closed_loop_acceleration = a_desired + Kp * (q_desired - q) + Kv * (v_desired - vq)
+    torques = pin.rnea(robot.model, robot.data, q, vq, closed_loop_acceleration)
+    torques += _grasp_wrench_torque(sim, robot, cube, q, vq)
+    limits = np.minimum(MAX_TORQUE, robot.model.effortLimit)
+    sim.step(np.clip(torques, -limits, limits).tolist())
+
+
+if __name__ == '__main__':
+    from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
+    from setup_pinocchio import setuppinocchio
     from inverse_geometry import computeqgrasppose
     from path import computepath
-    
-    q0,successinit = computeqgrasppose(robot, robot.q0, cube, CUBE_PLACEMENT, None)
-    qe,successend = computeqgrasppose(robot, robot.q0, cube, CUBE_PLACEMENT_TARGET,  None)
-    path = computepath(q0,qe,CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET)
-
-    
-    #setting initial configuration
-    sim.setqsim(q0)
-    
-    
-    #TODO this is just an example, you are free to do as you please.
-    #In any case this trajectory does not follow the path 
-    #0 init and end velocities
-    def maketraj(q0,q1,T): #TODO compute a real trajectory !
-        q_of_t = Bezier([q0,q0,q1,q1],t_max=T)
-        vq_of_t = q_of_t.derivative(1)
-        vvq_of_t = vq_of_t.derivative(1)
-        return q_of_t, vq_of_t, vvq_of_t
-    
-    
-    #TODO this is just a random trajectory, you need to do this yourself
-    total_time=4.
-    trajs = maketraj(q0, qe, total_time)   
-    
-    tcur = 0.
-    
-    
-    while tcur < total_time:
-        rununtil(controllaw, DT, sim, robot, trajs, tcur, cube)
-        tcur += DT
+    from demo import main
+    robot, _, _, cube = setuppinocchio()
+    q0, ok0 = computeqgrasppose(robot, robot.q0, cube, CUBE_PLACEMENT)
+    qe, oke = computeqgrasppose(robot, q0, cube, CUBE_PLACEMENT_TARGET)
+    if not (ok0 and oke):
+        raise RuntimeError('Endpoint grasp failed')
+    # Edit q0/qe before planning or replace path below; the runner uses this
+    # exact path and initialises Bullet at path[0], with no hidden replacement.
+    path = computepath(q0, qe, CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET, robot, cube)
+    main(path=path)
     
     
     

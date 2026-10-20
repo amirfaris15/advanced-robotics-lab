@@ -1,97 +1,112 @@
-# Advanced Robotics (INFR112132022) software labs
+# Advanced Robotics - Coursework 2
 
-These instructions are written for ARO labs regarding set up on DICE environment.
+The CW2 implementation now lives directly in the lab root. The original starter
+versions remain in Git history. Open [cw2_solution.ipynb](cw2_solution.ipynb) for
+the commented Jupyter runner, or run the Python entrypoints below.
 
-The lab instructions are given in the instructions notebook. 
-This readme provides you with the instructions for installing the lab requirements.
-**These instructions assume that you have already run the [tutorials instructions](https://github.com/ediadvancedrobotics/tutorials).** Note that the lab includes an additional dependency to the pybullet package. 
+## Setup
 
-## Set up - Python 3.11
+Use Python 3.11 and the supplied course environment from this directory:
 
-### On a DICE machine
-On DICE, we will clone the [lab repository](https://github.com/ediadvancedrobotics/lab) and install the required [dependencies](https://github.com/ediadvancedrobotics/lab/blob/main/requirements.txt). 
-You can "clone" the project to a local folder of your choice.
-Open a terminal (CTRL + ALT + T) and follow the commands below:
-
--   Move to home directory.
-
-```bash
-cd ~
-```
-  
--   Create the aro directory if not already done
-
-```bash
-mkdir -p aro && cd aro
-```
-
-- Clone the lab inside your home directory and cd into the folder
-
-```bash 
-git clone https://github.com/ediadvancedrobotics/lab/ && cd lab
-```
-
-- Install dependencies
-
-```bash
-cd lab
+```sh
 conda env update -f environment.yml
 conda activate aro2026
-```    
-
-Activating the environment also puts `meshcat-server` on PATH; no `.bashrc` edits
-are needed.
-
-
-You should be done! See [below](#using-and-updating-the-notebooks) to check that your installation is working 
-
-### Linux, Python 3, PyPI
-
-On a Linux system with Python 3.11 and PyBullet already installed (for example via
-the Conda setup above), install the remaining dependencies with +[pip (see installation procedure and update below)](#installing-pip):
-```bash
-python3 -m pip install -r requirements.txt
-```
-
-Once you have the dependencies, you can start the server with `jupyter notebook .`
-
-## Using and updating the repository
-You **must** create [a local fork](https://docs.github.com/en/pull-requests/how-tos/work-with-forks/fork-a-repo) of the repository on your github account to be able to save and commit your changes to the project.
-
-### Running the instructions notebook
-On your terminal, cd into the lab folder:
-```bash
-cd  ~/aro/lab/
-```
-Now run Jupyter notebook with the command
-```bash
+python -m ipykernel install --user --name aro2026 --display-name "ARO CW2 (Python 3.11)"
 jupyter notebook .
 ```
-Click on 'instructions.ipynb ' to open the instructions notebook.
 
+Select **ARO CW2 (Python 3.11)** in Jupyter. Restart the kernel after source
+changes: old imported modules stay cached until restarted. No new Python
+dependencies are required. Optional MP4 recording needs the system `ffmpeg`
+executable; running the simulation does not. There are no migrations, database
+or deployment steps; this is a local robotics project.
 
-### Other helpful instructions
-There is a pinocchio cheat sheet available as a pdf. You can also run the notebook "A_pinocchio_cheat_notebook.ipynb" to get a summary of the instructions.
-Pinocchio is a bit dense and has its own singular API, it might take some time for you to become familiar with it, but trust me, this will prove largely beneficial.
+## Run and understand the code
 
-### Editing the notebook and updates
-If the repository changes (for example if a bug has been found and corrected by the ARO staff), you will need to update your local
-version by "pulling" it from the repository. On a native installation, just go in the folder containing the lab and execute ```git pull```
+| File | Purpose |
+| --- | --- |
+| `inverse_geometry.py` | Find collision-free starting/goal grasps using damped two-hand IK, posture bias and seed restarts. |
+| `solution.py` | Store the relative hand transform for diagnostics. |
+| `path.py` | Plan a projected direct, lift-carry-lower or RRT path; check the exact requested endpoint. |
+| `control.py` | Quintic time parameterisation and inverse-dynamics tracking with inward squeeze and weight support. |
+| `simulation.py` | Isolated Bullet connection and scene setup. |
+| `demo.py` | Execute a supplied/planned path, collect metrics, record optional video and clean up. |
+| `viewer.py` | Connect to Meshcat, or start it if no server responds. |
+| `verify.py` | Geometry, trajectory and contact-physics regression checks. |
+| `package_submission.py` | Build a clean archive with models, runnable root scripts, short README and video. |
 
-
-## Side notes
-
-### Installing pip
-
-Pip is a tool for installing and managing Python packages. You can install it with
-
-```bash
-sudo apt install python3-pip
+```sh
+python inverse_geometry.py
+python path.py
+python control.py
 ```
 
-The default version of +pip installed by +apt is not up to date, so upgrade it with
-```bash
-python3 -m pip install --upgrade --user
+The first two use Meshcat. The last opens Bullet, runs the carry, then closes
+its connection. The control entrypoint exposes editable `q0`, `qe`, and `path`;
+the simulator uses that supplied path. Use `python control.py --headless` for
+the same physics without a window. Visible rendering runs at 25 Hz with 1 kHz
+physics, hidden debug panels and disabled scene-reset keyboard shortcuts.
+
+The notebook resets the cube after endpoint IK and moves it with the hands
+during path playback. Its physics cell defaults to headless; set
+`OPEN_BULLET_WINDOW = True` for the GUI.
+The separate `lab_instructions.ipynb` retains the course notes and a simplified
+robot/table view; its older setup cells expect an already running Meshcat server.
+
+## Model assumptions and limits
+
+The Bullet scene anchors the robot base, uses authored inertias, removes
+spurious masses on empty hand/hook coordinate frames, and disables joint/link
+damping to match the inverse-dynamics model. Solid masses, geometry, friction
+and gravity are unchanged. The cube is carried through contact friction:
+no artificial attachments or cube teleportation during motion.
+
+The starter's disabled Bullet self-contact setting is retained. Planned self
+collisions are checked using Pinocchio/SRDF. Dense collision checks are finite
+samples, not a proof of continuous-time collision freedom. Some perturbed
+targets fail IK; no general-layout robustness or trajectory-optimisation bonus
+is claimed. DICE execution has not been verified.
+
+## Verification
+
+```sh
+python verify.py
+python verify.py --geometry-only
+python demo.py --headless --record artifacts/new_run.mp4
 ```
 
-In general, running +pip is likely to run an alias on +pip in /usr, so either run it through python3 as explained above, or make sure your path select the right pip executable in your ~/.local. The option --user is kind of optional for recent +pip version, but removing it should work with a warning.
+The verifier checks endpoint IK, exact qgoal, dense grasp/collision/joint-limit
+conditions, trajectory boundary derivatives and peak velocity. It then tests
+default and translated-goal physical carries. A pass requires <2 cm final
+translation error, >1 second of airborne contact with both arms, and no measured
+table/obstacle contact or joint-limit violations. Existing evidence/video and
+historical review notes are in the local, Git-ignored `artifacts/` directory.
+The tested default run lifted the cube 18 cm and ended about 1 mm from target.
+
+Common failures: missing `pinocchio`/`pybullet` means the wrong environment;
+an import error after an edit can mean a cached kernel; failed IK/RRT can mean
+an infeasible target or exhausted search budget. Meshcat setup in `viewer.py`
+probes the server before connecting, avoiding an indefinite wait on a dead
+server. If the GUI fails, headless verification separates physics from rendering.
+
+## Version control and submission
+
+See [the commit guide](docs/VERSION_CONTROL.md) for a dependency-aware breakdown
+of the work and a workflow for future changes. The first two groups were
+committed separately; the remaining implementation is grouped into one
+integration commit at the owner's request.
+Keep source, models, environment files and useful notebook cells in Git.
+Generated videos, ZIPs, verification reports, caches and macOS metadata are
+ignored. Review unrelated existing edits separately.
+Fresh clones do not include the local `artifacts/` directory. To package a new
+submission, record a successful run first and pass that video's path below.
+
+```sh
+python package_submission.py --output artifacts/STUDENT1NAME_STUDENT2NAME.zip --video artifacts/successful_run.mp4
+```
+
+Replace both placeholders with the students' family names. The builder refuses
+overwrite and substitutes the <=300-word `SUBMISSION_README.md` inside the ZIP.
+Older archives in artifacts use the earlier folder layout; build a new archive
+when submitting current changes. The ZIP is a deliverable, not a Git commit.
+The project retains the supplied LICENSE.
