@@ -1,4 +1,10 @@
 # Byte-compiled / optimized / DLL files
+# Local metadata and generated deliverables
+.DS_Store
+/artifacts/
+*.zip
+*.mp4
+
 __pycache__/
 *.py[cod]
 *$py.class
