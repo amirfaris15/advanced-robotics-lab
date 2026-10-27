@@ -21,6 +21,14 @@ dependencies are required. Optional MP4 recording needs the system `ffmpeg`
 executable; running the simulation does not. There are no migrations, database
 or deployment steps; this is a local robotics project.
 
+On this Mac, the existing course environment is in `../aro2026`. If `python`
+or `conda` is not found in Terminal, run the scripts with its interpreter
+directly from the lab folder, for example:
+
+```sh
+../aro2026/bin/python path.py
+```
+
 ## Run and understand the code
 
 | File | Purpose |
@@ -41,15 +49,21 @@ python path.py
 python control.py
 ```
 
-The first two use Meshcat. The last opens Bullet, runs the carry, then closes
-its connection. The control entrypoint exposes editable `q0`, `qe`, and `path`;
+The first two open Meshcat in a browser when run from an interactive Terminal.
+Keep the Terminal command running while viewing the robot; press Enter in that
+Terminal to close its temporary viewer server. If you opened an older Meshcat
+tab and see only a blue grid, use the URL printed by the current run. The last
+command opens Bullet, runs the carry, then closes its connection. The control
+entrypoint exposes editable `q0`, `qe`, and `path`;
 the simulator uses that supplied path. Use `python control.py --headless` for
 the same physics without a window. Visible rendering runs at 25 Hz with 1 kHz
 physics, hidden debug panels and disabled scene-reset keyboard shortcuts.
 
 The notebook resets the cube after endpoint IK and moves it with the hands
-during path playback. Its physics cell defaults to headless; set
-`OPEN_BULLET_WINDOW = True` for the GUI.
+during path playback. Its physics cell runs headlessly. On macOS, the PyBullet
+GUI can fail inside a Jupyter kernel and leave its window unresponsive; run
+`python control.py` from Terminal to watch the physical carry. The GUI process
+closes automatically when the run finishes.
 The separate `lab_instructions.ipynb` retains the course notes and a simplified
 robot/table view; its older setup cells expect an already running Meshcat server.
 

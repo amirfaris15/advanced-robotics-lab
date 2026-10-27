@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 
 import numpy as np
@@ -23,6 +24,12 @@ def run_demo(gui=False, start=None, goal=None, path=None, record=None):
     start/goal are cube SE3 poses; an optional supplied path is used unchanged.
     Recording uses the system ffmpeg executable only; it is not needed to run.
     """
+    if gui and sys.platform == 'darwin' and 'ipykernel' in sys.modules:
+        raise RuntimeError(
+            'PyBullet GUI can freeze inside a macOS Jupyter kernel. '
+            'Run `python control.py` from Terminal to watch the physical carry; '
+            'use run_demo(gui=False) inside Jupyter.'
+        )
     start = CUBE_PLACEMENT if start is None else start
     goal = CUBE_PLACEMENT_TARGET if goal is None else goal
     robot, _, _, cube = setuppinocchio()

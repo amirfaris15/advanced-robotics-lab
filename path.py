@@ -246,7 +246,7 @@ def displaypath(robot, path, dt, viz, cube=None):
 
 if __name__ == "__main__":
     from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
-    from viewer import setupwithmeshcat
+    from viewer import keep_viewer_open, open_viewer, setupwithmeshcat
 
     robot, cube, viz = setupwithmeshcat()
     q0, initial_ok = computeqgrasppose(robot, robot.q0, cube, CUBE_PLACEMENT, viz)
@@ -255,5 +255,6 @@ if __name__ == "__main__":
         raise RuntimeError("Cannot plan because one grasping configuration failed")
     path = computepath(q0, qe, CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET, robot, cube)
     print(f"planned {len(path)} grasping configurations")
+    open_viewer(viz)
     displaypath(robot, path, dt=0.05, viz=viz, cube=cube)
-    
+    keep_viewer_open()

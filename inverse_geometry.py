@@ -143,7 +143,7 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
 
 if __name__ == "__main__":
     from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
-    from viewer import setupwithmeshcat
+    from viewer import keep_viewer_open, open_viewer, setupwithmeshcat
 
     robot, cube, viz = setupwithmeshcat()
     q0, initial_ok = computeqgrasppose(robot, robot.q0, cube, CUBE_PLACEMENT, viz)
@@ -151,6 +151,5 @@ if __name__ == "__main__":
     print(f"initial grasp: {initial_ok}; target grasp: {final_ok}")
     if initial_ok:
         display_grasp(robot, cube, q0, viz, CUBE_PLACEMENT)
-    
-    
-    
+    open_viewer(viz)
+    keep_viewer_open()
