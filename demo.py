@@ -15,7 +15,6 @@ from setup_pinocchio import setuppinocchio
 from inverse_geometry import computeqgrasppose
 from path import computepath
 from control import PiecewiseQuinticTrajectory, controllaw
-from simulation import Simulation
 
 
 def run_demo(gui=False, start=None, goal=None, path=None, record=None):
@@ -30,6 +29,11 @@ def run_demo(gui=False, start=None, goal=None, path=None, record=None):
             'Run `python control.py` from Terminal to watch the physical carry; '
             'use run_demo(gui=False) inside Jupyter.'
         )
+    # Physics is optional for geometry-only tools such as verify.py
+    # --geometry-only.  Delay this import so IK/RRT checks do not require
+    # PyBullet to be importable.
+    from simulation import Simulation
+
     start = CUBE_PLACEMENT if start is None else start
     goal = CUBE_PLACEMENT_TARGET if goal is None else goal
     robot, _, _, cube = setuppinocchio()

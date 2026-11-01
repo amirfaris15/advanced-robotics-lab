@@ -79,9 +79,12 @@ def setupwithmeshcat(url=MESHCAT_URL):
      viz = setupmeshcat(robot, url)
      return robot, cube, viz
  
-from setup_pybullet import setuppybullet
 def setupwithpybullet():
      '''setups everything to work with the robot and pybullet'''
+     # Keep geometry-only users independent of the optional physics package.
+     # Importing this module at file load time made IK/RRT checks fail before
+     # they could run when PyBullet was not installed.
+     from setup_pybullet import setuppybullet
      robot, table, obstacle, cube = setuppinocchio()   
      sim = setuppybullet(robot)
      sim.setTorqueControlMode()
@@ -90,6 +93,7 @@ def setupwithpybullet():
     
 def setupwithpybulletandmeshcat(url=MESHCAT_URL):
      '''setups everything to work with the robot, pybullet AND meshcat'''
+     from setup_pybullet import setuppybullet
      robot, table, obstacle, cube = setuppinocchio() 
      viz = setupmeshcat(robot)
      sim = setuppybullet(robot)

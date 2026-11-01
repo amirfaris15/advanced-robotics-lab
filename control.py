@@ -23,9 +23,13 @@ class PiecewiseQuinticTrajectory:
     """
 
     def __init__(self, path, max_joint_speed=0.40):
-        if len(path) < 2:
-            raise ValueError("a trajectory needs at least two configurations")
+        if len(path) < 1:
+            raise ValueError("a trajectory needs at least one configuration")
         self.path = [np.asarray(q, dtype=float).copy() for q in path]
+        if any(q.ndim != 1 or not np.all(np.isfinite(q)) for q in self.path):
+            raise ValueError("trajectory configurations must be finite vectors")
+        if any(q.shape != self.path[0].shape for q in self.path[1:]):
+            raise ValueError("all trajectory configurations must have the same size")
         changes = [np.max(np.abs(b - a)) for a, b in zip(self.path[:-1], self.path[1:])]
         if max_joint_speed <= 0:
             raise ValueError("max_joint_speed must be positive")
@@ -35,6 +39,8 @@ class PiecewiseQuinticTrajectory:
         self.duration = float(self.breakpoints[-1])
 
     def _segment(self, t):
+        if not self.durations.size:
+            return 0, 0.0
         t = float(np.clip(t, 0.0, self.duration))
         index = min(np.searchsorted(self.breakpoints, t, side="right") - 1, len(self.durations) - 1)
         local_time = t - self.breakpoints[index]
@@ -42,6 +48,9 @@ class PiecewiseQuinticTrajectory:
 
     def evaluate(self, t):
         """Return desired position, velocity and acceleration at time ``t``."""
+        if not self.durations.size:
+            zeros = np.zeros_like(self.path[0])
+            return self.path[0].copy(), zeros, zeros
         index, s = self._segment(t)
         delta = self.path[index + 1] - self.path[index]
         duration = self.durations[index]
@@ -91,8 +100,7 @@ def _grasp_wrench_torque(sim, robot, cube, q, vq):
         )
         force = sign * SQUEEZE_FORCE * cube_placement.rotation[:, 1]
         force += np.array([0., 0., mass * 9.81 / 2])
-        # Pinocchio's spatial Jacobian order is linear then angular, so this
-        # is a pure Cartesian force with no artificial moment.
+        # This frame Jacobian uses linear rows followed by angular rows.
         total += jacobian.T @ np.concatenate((force, np.zeros(3)))
     return total
 
@@ -112,20 +120,24 @@ def controllaw(sim, robot, trajs, tcurrent, cube):
 
 
 if __name__ == '__main__':
-    from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
-    from setup_pinocchio import setuppinocchio
-    from inverse_geometry import computeqgrasppose
-    from path import computepath
+    try:
+        import pybullet  # noqa: F401
+    except ModuleNotFoundError as error:
+        if error.name == 'pybullet':
+            raise SystemExit(
+                "PyBullet is not installed in this Python environment. "
+                "Create the course environment first with: "
+                "conda env update -f environment.yml && conda activate aro2026; "
+                "then run `python control.py` from this directory."
+            ) from error
+        raise
+
+    # Keep this file as the single user-facing entry point.  The runner owns
+    # scene creation, endpoint IK, path planning, simulation and CLI parsing;
+    # duplicating those steps here made `python control.py` solve the task
+    # twice and could leave the visual and physical scenes out of sync.
     from demo import main
-    robot, _, _, cube = setuppinocchio()
-    q0, ok0 = computeqgrasppose(robot, robot.q0, cube, CUBE_PLACEMENT)
-    qe, oke = computeqgrasppose(robot, q0, cube, CUBE_PLACEMENT_TARGET)
-    if not (ok0 and oke):
-        raise RuntimeError('Endpoint grasp failed')
-    # Edit q0/qe before planning or replace path below; the runner uses this
-    # exact path and initialises Bullet at path[0], with no hidden replacement.
-    path = computepath(q0, qe, CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET, robot, cube)
-    main(path=path)
+    main()
     
     
     
