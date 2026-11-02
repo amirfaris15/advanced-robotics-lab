@@ -6,7 +6,50 @@ import pinocchio as pin
 
 from config import EPSILON, LEFT_HAND, LEFT_HOOK, RIGHT_HAND, RIGHT_HOOK
 from tools import collision, jointlimitsviolated, projecttojointlimits, setcubeplacement
-from solution import remember_hand_relation
+# Keep the relative hand placement locally; the original course solution.py
+# does not provide a helper for storing it.
+HAND_RELATION = None
+
+def remember_hand_relation(left, right):
+    global HAND_RELATION
+    HAND_RELATION = left.inverse() * right
+    return HAND_RELATION
+
+
+def setup_viewer():
+    """Use an existing Meshcat server, or start one when none responds."""
+    import zmq
+    from config import MESHCAT_URL
+    from tools import setupwithmeshcat
+    context = zmq.Context()
+    socket = context.socket(zmq.REQ)
+    socket.setsockopt(zmq.LINGER, 0)
+    try:
+        socket.connect(MESHCAT_URL)
+        socket.send(b'url')
+        ready = bool(socket.poll(500))
+        if ready:
+            socket.recv()
+    finally:
+        socket.close()
+        context.term()
+    return setupwithmeshcat(url=MESHCAT_URL if ready else None)
+
+
+def open_viewer(viz):
+    import sys
+    if sys.stdin.isatty():
+        viz.viewer.open()
+
+
+def keep_viewer_open():
+    import sys
+    if sys.stdin.isatty():
+        try:
+            input("Meshcat is open. Press Enter to finish. ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+
 
 
 def _frame_placement(robot, q, frame_name):
@@ -168,9 +211,8 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
 
 if __name__ == "__main__":
     from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
-    from viewer import keep_viewer_open, open_viewer, setupwithmeshcat
 
-    robot, cube, viz = setupwithmeshcat()
+    robot, cube, viz = setup_viewer()
     q0, initial_ok = computeqgrasppose(robot, robot.q0, cube, CUBE_PLACEMENT, viz)
     qe, final_ok = computeqgrasppose(robot, q0, cube, CUBE_PLACEMENT_TARGET, viz)
     print(f"initial grasp: {initial_ok}; target grasp: {final_ok}")

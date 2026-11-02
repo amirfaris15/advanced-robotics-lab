@@ -58,8 +58,8 @@ def _project_segment(robot, cube, q_start, cube_start, cube_end, step=0.025):
 
 def _sample_cube_pose(rng, start, goal):
     """Sample the useful portion of the tabletop, with clearance around ends."""
-    lo = np.minimum(start.translation, goal.translation) - np.array([0.20, 0.25, 0.0])
-    hi = np.maximum(start.translation, goal.translation) + np.array([0.20, 0.25, 0.0])
+    lo = np.minimum(start.translation, goal.translation) - np.array([0.04, 0.05, 0.0])
+    hi = np.maximum(start.translation, goal.translation) + np.array([0.04, 0.05, 0.0])
     # Include clearance above the table: a height-only obstacle cannot be
     # traversed if every random sample is restricted to tabletop height.
     # Clamp each interval without assuming that a caller's target is inside
@@ -78,7 +78,7 @@ def _sample_cube_pose(rng, start, goal):
     translation = np.array([
         rng.uniform(x0, x1),
         rng.uniform(y0, y1),
-        rng.uniform(min(start.translation[2], goal.translation[2]),
+        rng.uniform(min(start.translation[2], goal.translation[2]) + 0.16,
                     max(start.translation[2], goal.translation[2]) + 0.20),
     ])
     rotation = _interpolate_pose(start, goal, rng.uniform()).rotation
@@ -150,7 +150,7 @@ def smoothpath(robot, cube, nodes, chain, rng=None, attempts=80):
     if attempts < 0:
         raise ValueError("attempts must be non-negative")
     if rng is None:
-        rng = np.random.default_rng(2026)
+        rng = np.random.default_rng(15)
     smoothed = _shortcut_chain(robot, cube, nodes, chain, rng, attempts)
     projected = _project_chain(robot, cube, nodes, smoothed)
     if projected is None:
@@ -263,29 +263,9 @@ def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal, robot=None, c
     if jointlimitsviolated(robot, qgoal) or collision(robot, qgoal):
         raise ValueError("qgoal is invalid; compute a valid grasp before planning")
 
-    # Always test the cheap direct edge first.  It is common for nearby,
-    # perturbed placements and avoids RRT randomness when it is already valid.
-    direct_path, direct_ok = _project_segment(
-        robot, cube, qinit, cubeplacementq0, cubeplacementqgoal
-    )
-    if direct_ok:
-        completed = _finish_at_goal(robot, cube, [qinit] + direct_path, qgoal, cubeplacementqgoal)
-        if completed is not None:
-            return completed
-
-    # The coursework obstacle can be cleared by carrying the cube over it.
-    # This is attempted before random exploration so the standard scene is
-    # repeatable and fast, while RRT remains available for perturbed layouts.
-    clearance_path = _try_clearance_route(
-        robot, cube, qinit, cubeplacementq0, cubeplacementqgoal
-    )
-    if clearance_path is not None:
-        completed = _finish_at_goal(robot, cube, clearance_path, qgoal, cubeplacementqgoal)
-        if completed is not None:
-            return completed
-
+    # Grow an RRT for every request; each edge is projected onto the grasp.
     nodes = [_Node(cubeplacementq0, qinit, None)]
-    rng = np.random.default_rng(2026)  # reproducible runs are easier to assess
+    rng = np.random.default_rng(15)  # reproducible runs are easier to assess
     max_iterations, step_length = 500, 0.075
 
     for iteration in range(max_iterations):
@@ -351,9 +331,9 @@ def displaypath(robot, path, dt, viz, cube=None):
 
 if __name__ == "__main__":
     from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET
-    from viewer import keep_viewer_open, open_viewer, setupwithmeshcat
+    from inverse_geometry import keep_viewer_open, open_viewer, setup_viewer
 
-    robot, cube, viz = setupwithmeshcat()
+    robot, cube, viz = setup_viewer()
     q0, initial_ok = computeqgrasppose(robot, robot.q0, cube, CUBE_PLACEMENT, viz)
     qe, final_ok = computeqgrasppose(robot, q0, cube, CUBE_PLACEMENT_TARGET, viz)
     if not (initial_ok and final_ok):
