@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Projected RRT planner for a rigid bimanual grasp."""
 
+# Lets `_Node`'s `int | None` annotation (below) be parsed as a string on
+# Python < 3.10, where dataclasses would otherwise evaluate `int | None`
+# eagerly and raise TypeError at import time.
+from __future__ import annotations
+
 from dataclasses import dataclass
 import time
 
@@ -210,34 +215,6 @@ def _project_chain(robot, cube, nodes, chain):
         result.extend(edge)
         q_previous = edge[-1]
     return result
-
-
-def _try_clearance_route(robot, cube, qinit, cube_start, cube_goal):
-    """Try a simple, collision-aware lift-carry-lower motion first.
-
-    In the supplied scene the fixed obstacle is a low bar. Sampling only at
-    tabletop height makes RRT spend most of its time proposing colliding edges;
-    lifting the cube above the bar is both natural and a useful deterministic
-    connection attempt. Different clearances are tried because an excessively
-    high lift can exceed the robot's workspace.
-    """
-    for clearance in (0.18, 0.15, 0.20):
-        start_above = pin.SE3(
-            cube_start.rotation, cube_start.translation + np.array([0.0, 0.0, clearance])
-        )
-        goal_above = pin.SE3(
-            cube_goal.rotation, cube_goal.translation + np.array([0.0, 0.0, clearance])
-        )
-        lift, lift_ok = _project_segment(robot, cube, qinit, cube_start, start_above)
-        if not lift_ok:
-            continue
-        carry, carry_ok = _project_segment(robot, cube, lift[-1], start_above, goal_above)
-        if not carry_ok:
-            continue
-        lower, lower_ok = _project_segment(robot, cube, carry[-1], goal_above, cube_goal)
-        if lower_ok:
-            return [qinit] + lift + carry + lower
-    return None
 
 
 def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal, robot=None, cube=None):
