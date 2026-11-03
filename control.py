@@ -4,7 +4,7 @@
 import numpy as np
 import pinocchio as pin
 
-from config import LEFT_HAND, LEFT_HOOK, RIGHT_HAND, RIGHT_HOOK
+from config import LEFT_HAND, RIGHT_HAND
 
 
 Kp = 300.0
@@ -71,14 +71,7 @@ def _reference_at(trajs, tcurrent):
     return tuple(trajectory(tcurrent) for trajectory in trajs)
 
 
-def _world_cube_hook(cube, hook_name, cube_placement):
-    """Use the static URDF hook offset with the cube's simulated world pose."""
-    pin.framesForwardKinematics(cube.model, cube.data, cube.q0)
-    hook_in_cube = cube.data.oMf[cube.model.getFrameId(hook_name)]
-    return cube_placement * hook_in_cube
-
-
-def _grasp_wrench_torque(sim, robot, cube, q, vq):
+def _grasp_wrench_torque(sim, robot, q):
     """Squeeze opposing faces and support weight through hand joint torques.
 
     A spring aimed at the exact hook gives zero force when aligned, so it
@@ -114,7 +107,7 @@ def controllaw(sim, robot, trajs, tcurrent, cube):
     # torque command.  nle includes gravity, Coriolis and centrifugal terms.
     closed_loop_acceleration = a_desired + Kp * (q_desired - q) + Kv * (v_desired - vq)
     torques = pin.rnea(robot.model, robot.data, q, vq, closed_loop_acceleration)
-    torques += _grasp_wrench_torque(sim, robot, cube, q, vq)
+    torques += _grasp_wrench_torque(sim, robot, q)
     limits = np.minimum(MAX_TORQUE, robot.model.effortLimit)
     sim.step(np.clip(torques, -limits, limits).tolist())
 

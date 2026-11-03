@@ -6,16 +6,6 @@ import pinocchio as pin
 
 from config import EPSILON, LEFT_HAND, LEFT_HOOK, RIGHT_HAND, RIGHT_HOOK
 from tools import collision, jointlimitsviolated, projecttojointlimits, setcubeplacement
-# Keep the relative hand placement locally; the original course solution.py
-# does not provide a helper for storing it.
-HAND_RELATION = None
-
-def remember_hand_relation(left, right):
-    global HAND_RELATION
-    HAND_RELATION = left.inverse() * right
-    return HAND_RELATION
-
-
 def setup_viewer():
     """Use an existing Meshcat server, or start one when none responds."""
     import zmq
@@ -50,12 +40,6 @@ def keep_viewer_open():
         except (EOFError, KeyboardInterrupt):
             print()
 
-
-
-def _frame_placement(robot, q, frame_name):
-    """Update kinematics and return the world placement of one named frame."""
-    pin.framesForwardKinematics(robot.model, robot.data, q)
-    return robot.data.oMf[robot.model.getFrameId(frame_name)]
 
 
 def _cube_hook_target(cube, cube_placement, hook_name):
@@ -197,9 +181,6 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
         if (converged and
                 _grasp_residual(robot, cube, q, cubetarget) < 5 * EPSILON and
                 not jointlimitsviolated(robot, q) and not collision(robot, q)):
-            left = _frame_placement(robot, q, LEFT_HAND)
-            right = _frame_placement(robot, q, RIGHT_HAND)
-            remember_hand_relation(left, right)
             if viz is not None:
                 viz.display(q)
             return q, True
