@@ -27,17 +27,6 @@ For a non-visual physics check, use `python control.py --headless` or
 `python bonus.py --headless`. Start and goal configurations and a path can be
 edited at the bottom of `control.py`.
 
-## Methods and limits
+Inverse geometry: Jocobian IK on both hands 
 
-Inverse geometry uses damped Jacobian least squares for both hands, a posture
-bias and collision/joint-limit checks. Path planning uses a projected RRT and
-collision-checked shortcutting. Control uses inverse-dynamics torque tracking;
-a quadratic programme fits a smooth joint trajectory to the planned path.
-Collision and grasp checks along the trajectory use finite samples. The bonus
-calculates a ballistic throw to a random target and releases the cube by
-disabling robot–cube contacts in the simulator. Some target placements fail IK
-or the landing check.
-
-Local tests have passed headlessly on macOS; DICE has not been verified. A
-PyBullet GUI run may lose its connection on macOS. A successful-run video is
-required alongside this project for coursework submission.
+Motion planning: RRT over cube placements. EAch edge is projected by re-solving IK every 2.5cm, so every configuration grasps the cube. Shortcut smoothing, then goal 

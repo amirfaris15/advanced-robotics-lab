@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Projected RRT planner for a rigid bimanual grasp."""
 
-# Lets `_Node`'s `int | None` annotation (below) be parsed as a string on
-# Python < 3.10, where dataclasses would otherwise evaluate `int | None`
-# eagerly and raise TypeError at import time.
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -20,7 +16,6 @@ from config import LEFT_HAND, RIGHT_HAND, LEFT_HOOK, RIGHT_HOOK, EPSILON
 
 @dataclass
 class _Node:
-    """One RRT node: its cube pose, grasping robot pose, and parent index."""
 
     cube_pose: pin.SE3
     q: np.ndarray
@@ -28,25 +23,17 @@ class _Node:
 
 
 def _interpolate_pose(start, end, alpha):
-    """Interpolate a full SE(3) cube pose rather than only its translation."""
     displacement = pin.log6(start.inverse() * end).vector
     return start * pin.exp6(displacement * alpha)
 
 
 def _cube_distance(first, second):
-    """Use metres plus a small rotation penalty as the RRT distance metric."""
     translation = np.linalg.norm(first.translation - second.translation)
     rotation = np.linalg.norm(pin.log3(first.rotation.T @ second.rotation))
     return translation + 0.10 * rotation
 
-
+#move the cube from stat to end in small steps, check if it can be done without collision or limit violation
 def _project_segment(robot, cube, q_start, cube_start, cube_end, step=0.025):
-    """Project a cube-space edge onto valid grasping configurations.
-
-    Each intermediate point is re-solved using the preceding solution as its
-    seed.  Consequently every returned configuration satisfies the bimanual
-    grasp constraint; ordinary joint-space linear interpolation would not.
-    """
     distance = _cube_distance(cube_start, cube_end)
     samples = max(1, int(np.ceil(distance / step)))
     path, q_previous = [], q_start
@@ -60,17 +47,10 @@ def _project_segment(robot, cube, q_start, cube_start, cube_end, step=0.025):
         q_previous = q_next
     return path, True
 
-
+#random cube position sampling, within bounds
 def _sample_cube_pose(rng, start, goal):
-    """Sample the useful portion of the tabletop, with clearance around ends."""
     lo = np.minimum(start.translation, goal.translation) - np.array([0.04, 0.05, 0.0])
     hi = np.maximum(start.translation, goal.translation) + np.array([0.04, 0.05, 0.0])
-    # Include clearance above the table: a height-only obstacle cannot be
-    # traversed if every random sample is restricted to tabletop height.
-    # Clamp each interval without assuming that a caller's target is inside
-    # the default table bounds.  ``uniform(a, b)`` raises when a > b, which
-    # made the planner fail before it had a chance to report an unreachable
-    # target.  For an out-of-bounds target, use the target-side interval.
     def bounded_interval(lower, upper, scene_lower, scene_upper):
         a, b = max(scene_lower, lower), min(scene_upper, upper)
         if a <= b:
@@ -89,14 +69,8 @@ def _sample_cube_pose(rng, start, goal):
     rotation = _interpolate_pose(start, goal, rng.uniform()).rotation
     return pin.SE3(rotation, translation)
 
-
+# make sure the path end at the goal 
 def _finish_at_goal(robot, cube, path, qgoal, goal_pose):
-    """Connect the IK branch to the requested exact endpoint, or reject it.
-
-    Equivalent grasps can have different torso/elbow postures. For a nearby
-    endpoint, explicitly check a finely sampled connecting segment for both
-    hook alignment and collision; never silently return another configuration.
-    """
     if not path:
         return None
     qgoal = np.asarray(qgoal, dtype=float)
@@ -116,8 +90,7 @@ def _finish_at_goal(robot, cube, path, qgoal, goal_pose):
                > 5 * EPSILON for fid, target in targets):
             return None
         tail.append(q)
-    # Validate the exact endpoint as well; assigning it after the loop would
-    # otherwise allow a caller to receive a colliding or out-of-limit qgoal.
+
     pin.framesForwardKinematics(robot.model, robot.data, qgoal)
     if jointlimitsviolated(robot, qgoal) or collision(robot, qgoal):
         return None
@@ -129,12 +102,6 @@ def _finish_at_goal(robot, cube, path, qgoal, goal_pose):
 
 
 def projectpath(robot, cube, q_start, cube_start, cube_end, step=0.025):
-    """Project a cube-space edge into valid bimanual robot configurations.
-
-    This is the coursework path-projection primitive made public so it can be
-    tested independently of the RRT.  The returned list excludes ``q_start``
-    and contains only successfully projected samples.
-    """
     if step <= 0:
         raise ValueError("step must be positive")
     q_start = np.asarray(q_start, dtype=float)
@@ -144,12 +111,6 @@ def projectpath(robot, cube, q_start, cube_start, cube_end, step=0.025):
 
 
 def smoothpath(robot, cube, nodes, chain, rng=None, attempts=80):
-    """Shortcut and re-project an RRT chain, preserving the grasp constraint.
-
-    ``nodes`` is the planner's node sequence and ``chain`` contains node
-    indices in start-to-goal order.  Smoothing is accepted only when the full
-    replacement edge passes IK and collision checks.
-    """
     if not chain:
         raise ValueError("chain must contain at least one node")
     if attempts < 0:
@@ -164,22 +125,14 @@ def smoothpath(robot, cube, nodes, chain, rng=None, attempts=80):
 
 
 def _trace_to_root(nodes, node_index):
-    """Recover RRT node indices in start-to-goal order."""
     indices = []
     while node_index is not None:
         indices.append(node_index)
         node_index = nodes[node_index].parent
     return list(reversed(indices))
 
-
+#straightens the route
 def _shortcut_chain(robot, cube, nodes, chain, rng, attempts=80):
-    """Remove RRT waypoints when a projected collision-free shortcut exists.
-
-    This is the usual coursework-1 path-smoothing post-process, applied in
-    cube pose space.  A shortcut is accepted only after the complete edge has
-    been projected through two-hand IK, so smoothing cannot discard the
-    grasping constraint or the collision checks performed by the planner.
-    """
     chain = list(chain)
     if len(chain) < 3:
         return chain
@@ -199,7 +152,6 @@ def _shortcut_chain(robot, cube, nodes, chain, rng, attempts=80):
 
 
 def _project_chain(robot, cube, nodes, chain):
-    """Rebuild a smoothed chain while propagating each projected IK seed."""
     result = [nodes[chain[0]].q]
     q_previous = nodes[chain[0]].q
     for first_index, second_index in zip(chain[:-1], chain[1:]):
@@ -216,14 +168,8 @@ def _project_chain(robot, cube, nodes, chain):
         q_previous = edge[-1]
     return result
 
-
+#check if the path is valid
 def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal, robot=None, cube=None):
-    """Return a collision-free, grasp-preserving path from ``qinit`` to ``qgoal``.
-
-    The four required positional arguments preserve the supplied coursework
-    API.  ``robot`` and ``cube`` are optional dependency-injection arguments so
-    callers that already have a scene do not need to create a second one.
-    """
     if robot is None or cube is None:
         from setup_pinocchio import setuppinocchio
         robot, _, _, cube = setuppinocchio()
@@ -240,14 +186,11 @@ def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal, robot=None, c
     if jointlimitsviolated(robot, qgoal) or collision(robot, qgoal):
         raise ValueError("qgoal is invalid; compute a valid grasp before planning")
 
-    # Grow an RRT for every request; each edge is projected onto the grasp.
     nodes = [_Node(cubeplacementq0, qinit, None)]
-    rng = np.random.default_rng(15)  # reproducible runs are easier to assess
+    rng = np.random.default_rng(15)  
     max_iterations, step_length = 500, 0.075
 
     for iteration in range(max_iterations):
-        # Goal bias accelerates connection around the obstacle. This bounded
-        # sampler is heuristic; it does not guarantee a solution in all scenes.
         sample = cubeplacementqgoal if iteration % 8 == 0 else _sample_cube_pose(
             rng, cubeplacementq0, cubeplacementqgoal
         )
@@ -272,12 +215,8 @@ def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal, robot=None, c
         chain = _trace_to_root(nodes, newest_index)
         try:
             result = smoothpath(robot, cube, nodes, chain, rng)
-        except RuntimeError:  # Defensive: protects against mutable-scene mistakes.
+        except RuntimeError:  
             continue
-
-        # Recompute the goal connection from the smoothed chain's actual IK
-        # endpoint.  A projected shortcut can choose a different redundant
-        # arm posture at the same cube pose.
         final_edge, final_ok = _project_segment(
             robot, cube, result[-1], nodes[chain[-1]].cube_pose, cubeplacementqgoal
         )
@@ -292,12 +231,6 @@ def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal, robot=None, c
 
 
 def displaypath(robot, path, dt, viz, cube=None):
-    """Replay a validated path; pass cube to animate its rigid grasp too.
-
-    The optional argument preserves the original robot-only display API.
-    Each frame recomputes the cube pose, so replay starts correctly even when
-    planning or a previous animation left the scene at the goal.
-    """
     for q in path:
         if cube is None:
             viz.display(q)
