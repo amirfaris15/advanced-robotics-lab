@@ -1,79 +1,74 @@
 #!/usr/bin/env python3  # Run this file with Python 3.
-"""Simple RRT/IK/gravity-based cube throw bonus."""  # File description.
-
-import argparse  # Reads command-line options.
-import json  # Formats the final result.
-import time  # Keeps the GUI close to real time.
-
-import numpy as np  # Numerical arrays and random targets.
-import pinocchio as pin  # Robot kinematics and dynamics.
-
-from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET, DT  # Scene poses and timestep.
-from control import Kp, Kv, MAX_TORQUE, PiecewiseQuinticTrajectory, Simulation, _grasp_wrench_torque  # Controller and simulation.
-from inverse_geometry import _solve_grasp, computeqgrasppose  # Bimanual IK.
-from path import computepath  # RRT path planner.
-from setup_pinocchio import setuppinocchio  # Pinocchio scene setup.
 
 
-GRAVITY = 9.81  # Gravitational acceleration in m/s².
-LIFT = 0.12  # Release height above the target in metres.
-ARC_CLEARANCE = 0.12  # Extra height used for the upward arc.
-STROKE_TIME = 0.04  # Duration of the fast launch stroke.
+import argparse
+import json
+import time
+
+import numpy as np
+import pinocchio as pin
+
+from config import CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET, DT
+from control import Kp, Kv, MAX_TORQUE, PiecewiseQuinticTrajectory, Simulation, _grasp_wrench_torque
+from inverse_geometry import _solve_grasp, computeqgrasppose
+from path import computepath
+from setup_pinocchio import setuppinocchio
+
+
+GRAVITY = 9.81
+LIFT = 0.12
+ARC_CLEARANCE = 0.12
+STROKE_TIME = 0.04
 
 
 def random_target():
-    """Choose a target across a reachable region, not only on the right."""
-    rng = np.random.default_rng()  # Create a random-number generator.
-    target = CUBE_PLACEMENT_TARGET.copy()  # Preserve the configured orientation and height.
-    center = CUBE_PLACEMENT_TARGET.translation.copy()  # Use the known reachable target as center.
-    center[1] -= 0.07  # Shift the sampling band toward the other side of the table.
-    target.translation[:2] = center[:2] + np.array([  # Sample around both sides of that center.
-        rng.uniform(-0.03, 0.03),  # Reachable x variation.
-        rng.uniform(-0.08, 0.08),  # y variation crossing slightly left and right.
+    rng = np.random.default_rng()
+    target = CUBE_PLACEMENT_TARGET.copy()
+    center = CUBE_PLACEMENT_TARGET.translation.copy()
+    target.translation[:2] = center[:2] + np.array([
+        rng.uniform(-0.03, 0.03),
+        rng.uniform(-0.08, 0.08),
     ])
-    return target  # Return the random target pose.
+    return target
 
 
-TARGET = random_target()  # Select one target when the program starts.
+TARGET = random_target()
 
 
 def gravity_throw_velocity(start, target):
-    """Calculate an upward ballistic velocity that reaches target."""
-    peak = max(start.translation[2], target.translation[2]) + ARC_CLEARANCE  # Desired arc height.
-    vz = np.sqrt(2.0 * GRAVITY * (peak - start.translation[2]))  # Initial upward velocity.
-    dz = target.translation[2] - start.translation[2]  # Target height relative to release.
-    flight_time = (vz + np.sqrt(vz * vz - 2.0 * GRAVITY * dz)) / GRAVITY  # Projectile flight time.
-    velocity = (target.translation - start.translation) / flight_time  # Horizontal velocity.
-    velocity[2] = vz  # Use the calculated vertical velocity.
-    return velocity, flight_time  # Return velocity and flight duration.
+    peak = max(start.translation[2], target.translation[2]) + ARC_CLEARANCE
+    vz = np.sqrt(2.0 * GRAVITY * (peak - start.translation[2]))
+    dz = target.translation[2] - start.translation[2]
+    flight_time = (vz + np.sqrt(vz * vz - 2.0 * GRAVITY * dz)) / GRAVITY
+    velocity = (target.translation - start.translation) / flight_time
+    velocity[2] = vz
+    return velocity, flight_time
 
 
 def solve_along_segment(robot, cube, q_start, pose_start, pose_end, step=0.035):
-    """Use continuation IK so every sampled pose keeps the bimanual grasp."""
-    distance = np.linalg.norm(pose_end.translation - pose_start.translation)  # Segment length.
-    count = max(1, int(np.ceil(distance / step)))  # Number of IK samples.
-    q = q_start  # Start IK from the supplied configuration.
-    for i in range(1, count + 1):  # Walk through the segment.
-        alpha = i / count  # Normalized interpolation value.
-        pose = pose_start.copy()  # Copy the starting pose.
-        pose.translation = (1.0 - alpha) * pose_start.translation + alpha * pose_end.translation  # Interpolate position.
-        q, success = computeqgrasppose(robot, q, cube, pose)  # Solve the next grasp IK.
+    distance = np.linalg.norm(pose_end.translation - pose_start.translation)
+    count = max(1, int(np.ceil(distance / step)))
+    q = q_start
+    for i in range(1, count + 1):
+        alpha = i / count
+        pose = pose_start.copy()
+        pose.translation = (1.0 - alpha) * pose_start.translation + alpha * pose_end.translation
+        q, success = computeqgrasppose(robot, q, cube, pose)
         if not success:
-            return None  # Stop if any intermediate grasp is invalid.
-    return q  # Return the final valid configuration.
+            return None
+    return q
 
 
 def open_hands(robot, q, cube_pose):
-    """Find a small outward hand motion for release."""
-    pin.framesForwardKinematics(robot.model, robot.data, q)  # Update hand poses.
-    outward = cube_pose.rotation[:, 1]  # Cube direction separating the hands.
-    targets = []  # Desired hand poses for the release.
+    pin.framesForwardKinematics(robot.model, robot.data, q)
+    outward = cube_pose.rotation[:, 1]
+    targets = []
     for name, sign in (("LARM_EFF", -1.0), ("RARM_EFF", 1.0)):
-        target = robot.data.oMf[robot.model.getFrameId(name)].copy()  # Current hand pose.
-        target.translation += sign * 0.02 * outward + np.array([0.0, 0.0, 0.01])  # Move outward/up.
-        targets.append((name, target))  # Add this hand's release target.
-    q_open, success = _solve_grasp(robot, q, targets, q, 180, 5e-3)  # Solve release IK.
-    return q_open if success else q.copy()  # Keep the old pose if release IK fails.
+        target = robot.data.oMf[robot.model.getFrameId(name)].copy()
+        target.translation += sign * 0.02 * outward + np.array([0.0, 0.0, 0.01])
+        targets.append((name, target))
+    q_open, success = _solve_grasp(robot, q, targets, q, 180, 5e-3)
+    return q_open if success else q.copy()
 
 
 def throw_trajectory(q0, q1, duration):
