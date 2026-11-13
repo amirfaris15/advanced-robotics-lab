@@ -1,23 +1,30 @@
-# Coding notes for the CW2 lab
+# Coursework implementation notes
 
-## Architecture
+The submission implementation lives in `inverse_geometry.py`, `path.py` and
+`control.py`. The geometry solver finds hand-to-hook grasps, the projected RRT
+in `path.py` plans a collision-checked geometric path, and `control.py` turns
+that path into a trajectory and simulates the carry in PyBullet. Keep the course
+interfaces and editable start, goal and path working. Do not assume this local
+notes file is part of the coursework submission.
 
-- `inverse_geometry.py` solves the two-hand grasp at a requested cube SE(3) pose. It must respect both hook frames, joint limits and collisions; do not hard-code the coursework's default target.
-- `path.py` plans and validates the grasp-constrained geometric carry. `displaypath` is a viewer playback, not the physical simulation.
-- `control.py`, `simulation.py` and `demo.py` execute the planned carry in PyBullet. The headless demo is the reliable automated verification path on macOS.
-- `viewer.py` probes the configured Meshcat ZMQ endpoint and starts a temporary server when none responds. Meshcat's temporary server is killed at Python interpreter exit, so interactive terminal entrypoints must open the viewer and keep their process alive until the user presses Enter.
+The default control trajectory is `OptimizedTrajectory`: a `quadprog` QP finds
+shared waypoint velocities and accelerations for a C2 piecewise-quintic path.
+It fits the input path and penalises acceleration, constrains sampled joint
+positions and velocities, checks exact polynomial joint extrema, and stretches
+time if necessary for speed bounds. The geometric grasp and collision check is
+sampled; it is not a continuous collision guarantee. The previous quintic
+interpolation remains available with `--trajectory quintic`.
+The control runner does not include video recording or an ffmpeg dependency.
 
-## Workflow and constraints
+`bonus.py` is the original throwing experiment from `origin/bonus-folder`;
+its simulation import points to `control.Simulation` because this worktree has
+no `simulation.py`, and its grasp-wrench call uses that controller's signature.
+It retains its original random-target and quintic approach
+and can fail for particular target samples. Test the bonus independently of
+the default QP carry; preserve the three coursework-file submission rules.
 
-- Use the `aro2026` Python 3.11 environment and run commands from the lab root.
-- On the project owner's Mac, `conda` and `python` may be absent from the shell PATH. The existing environment can be called directly as `../aro2026/bin/python` from the lab root.
-- Keep notebook and direct terminal entrypoints working. Restart a notebook kernel after Python source changes because imports are cached.
-- In the notebook, use Meshcat for geometry and headless PyBullet for physics. Run `python control.py` from Terminal for the visible PyBullet carry on macOS.
-- Preserve the original course files and avoid writing generated outputs or videos into version control.
-- After behavior or setup changes, update this file and `README.md` to match the code.
-
-## Verification
-
-- Run `python verify.py --geometry-only` for IK, path and trajectory checks.
-- Run `python verify.py` for the physical carry checks when touching physics or control.
-- For viewer changes, run `python inverse_geometry.py` and `python path.py` in an interactive terminal, check that each live Meshcat URL contains the robot scene, then press Enter to close the temporary server.
+After control changes, check both the default and a changed reachable goal in
+headless PyBullet, check waypoint interpolation, joint limits, grasp/collision
+samples and physical carry metrics, and exercise the graphical entry point where
+the platform permits. `quadprog` is already a course dependency. Do not treat a
+successful local run as evidence of a guaranteed mark or DICE compatibility.

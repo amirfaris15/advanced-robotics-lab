@@ -64,6 +64,190 @@ class PiecewiseQuinticTrajectory:
         )
 
 
+class OptimizedTrajectory(PiecewiseQuinticTrajectory):
+    """Fit a C2 quintic trajectory to the path with per-joint QPs.
+
+    Each waypoint has velocity and acceleration variables. Sharing these
+    variables between adjacent segments gives continuous position, velocity
+    and acceleration. The QP balances path fidelity and acceleration, with
+    zero endpoint velocity/acceleration and sampled position/speed limits.
+    """
+
+    def __init__(self, path, robot, max_joint_speed=0.40):
+        import quadprog
+        if not np.isfinite(max_joint_speed) or max_joint_speed <= 0:
+            raise ValueError('max_joint_speed must be finite and positive')
+        super().__init__(path, max_joint_speed=max_joint_speed)
+        count = len(self.path)
+        dims = self.path[0].size
+        if dims != robot.model.nq:
+            raise ValueError('path configurations do not match the robot model')
+        if any(np.any(q < robot.model.lowerPositionLimit - 1e-10) or
+               np.any(q > robot.model.upperPositionLimit + 1e-10) for q in self.path):
+            raise ValueError('path contains a configuration outside joint limits')
+        self.velocities = np.zeros((count, dims))
+        self.accelerations = np.zeros((count, dims))
+        self.reference_objective = 0.0
+        self.optimized_objective = 0.0
+        self.max_joint_speed = max_joint_speed
+        if count < 2:
+            return
+
+        for joint in range(dims):
+            n = 2 * count
+            rows, targets, columns, bounds = [], [], [], []
+            lower = robot.model.lowerPositionLimit[joint]
+            upper = robot.model.upperPositionLimit[joint]
+            for index, T in enumerate(self.durations):
+                q0, q1 = self.path[index][joint], self.path[index + 1][joint]
+                delta = q1 - q0
+                for u in (0.0, 0.25, 0.5, 0.75, 1.0):
+                    s = 10*u**3 - 15*u**4 + 6*u**5
+                    ds = 30*u*u - 60*u**3 + 30*u**4
+                    dds = 60*u - 180*u*u + 120*u**3
+                    h0 = u - 6*u**3 + 8*u**4 - 3*u**5
+                    h1 = -4*u**3 + 7*u**4 - 3*u**5
+                    h2 = (u*u - 3*u**3 + 3*u**4 - u**5) / 2
+                    h3 = (u**3 - 2*u**4 + u**5) / 2
+                    dh0 = 1 - 18*u*u + 32*u**3 - 15*u**4
+                    dh1 = -12*u*u + 28*u**3 - 15*u**4
+                    dh2 = u - 4.5*u*u + 6*u**3 - 2.5*u**4
+                    dh3 = 1.5*u*u - 4*u**3 + 2.5*u**4
+                    ddh0 = -36*u + 96*u*u - 60*u**3
+                    ddh1 = -24*u + 84*u*u - 60*u**3
+                    ddh2 = 1 - 9*u + 18*u*u - 10*u**3
+                    ddh3 = 3*u - 12*u*u + 10*u**3
+                    ids = [index, index + 1, count + index, count + index + 1]
+                    pos_row, vel_row, acc_row = np.zeros(n), np.zeros(n), np.zeros(n)
+                    pos_row[ids] = [T*h0, T*h1, T*T*h2, T*T*h3]
+                    vel_row[ids] = [dh0, dh1, T*dh2, T*dh3]
+                    acc_row[ids] = [ddh0/T, ddh1/T, ddh2, ddh3]
+                    base_q = q0 + s*delta
+                    base_v = ds*delta/T
+                    base_a = dds*delta/T**2
+                    columns.extend((vel_row, -vel_row))
+                    bounds.extend((-max_joint_speed - base_v,
+                                   -max_joint_speed + base_v))
+                    if 0.0 < u < 1.0:
+                        if np.isfinite(lower):
+                            columns.append(pos_row); bounds.append(lower - base_q)
+                        if np.isfinite(upper):
+                            columns.append(-pos_row); bounds.append(base_q - upper)
+                        # Penalise departing from the safe reference path.
+                        rows.append(np.sqrt(1000.0) * pos_row); targets.append(0.0)
+                        # Penalise acceleration, encouraging motion through joins.
+                        weight = np.sqrt(0.01 * T / 3)
+                        rows.append(weight * acc_row); targets.append(-weight * base_a)
+            A, b = np.asarray(rows), np.asarray(targets)
+            G = 2 * (A.T @ A + 1e-6 * np.eye(n))
+            linear = 2 * A.T @ b
+            identity = np.eye(n)
+            equalities = [identity[0], identity[count - 1], identity[count], identity[-1]]
+            C = np.column_stack(equalities + columns)
+            limits = np.asarray([0.0] * 4 + bounds)
+            try:
+                result = quadprog.solve_qp(G, linear, C, limits, meq=4)[0]
+            except ValueError as error:
+                raise RuntimeError(f'QP infeasible for joint {joint}: {error}') from error
+            self.velocities[:, joint] = result[:count]
+            self.accelerations[:, joint] = result[count:]
+            self.reference_objective += float(b @ b)
+            residual = A @ result - b
+            self.optimized_objective += float(residual @ residual + 1e-6 * (result @ result))
+
+        # Velocity is a quartic polynomial. Its extrema are endpoints and
+        # real roots of its cubic acceleration. Stretch time uniformly if a
+        # peak exceeds the bound; this preserves the geometric path.
+        peak = 0.0
+        for index, T in enumerate(self.durations):
+            coeff = self._coefficients(index)
+            for joint in range(dims):
+                c = coeff[:, joint]
+                # A quintic position's extrema lie at the roots of its
+                # quartic velocity. Check all real roots, not just QP samples.
+                pos_poly = [5*c[5], 4*c[4], 3*c[3], 2*c[2], c[1]]
+                pos_roots = np.roots(np.trim_zeros(pos_poly, 'f')) if np.any(np.abs(pos_poly) > 1e-14) else []
+                pos_points = [0.0, 1.0] + [float(root.real) for root in pos_roots
+                                           if abs(root.imag) < 1e-9 and 0 < root.real < 1]
+                for u in pos_points:
+                    value = sum(c[k] * u**k for k in range(6))
+                    if (value < robot.model.lowerPositionLimit[joint] - 1e-10 or
+                            value > robot.model.upperPositionLimit[joint] + 1e-10):
+                        raise RuntimeError(f'QP trajectory crosses joint {joint} limits between samples')
+                acc_poly = [20*c[5], 12*c[4], 6*c[3], 2*c[2]]
+                roots = np.roots(np.trim_zeros(acc_poly, 'f')) if np.any(np.abs(acc_poly) > 1e-14) else []
+                points = [0.0, 1.0] + [float(root.real) for root in roots
+                                       if abs(root.imag) < 1e-9 and 0 < root.real < 1]
+                for u in points:
+                    speed = abs((c[1] + 2*c[2]*u + 3*c[3]*u**2 + 4*c[4]*u**3 + 5*c[5]*u**4)/T)
+                    peak = max(peak, speed)
+        factor = max(1.0, peak / max_joint_speed)
+        self.durations *= factor
+        self.velocities /= factor
+        self.accelerations /= factor**2
+        self.breakpoints = np.concatenate(([0.0], np.cumsum(self.durations)))
+        self.duration = float(self.breakpoints[-1])
+
+    def _coefficients(self, index):
+        T = self.durations[index]
+        q0, q1 = self.path[index:index + 2]
+        v0, v1 = T * self.velocities[index:index + 2]
+        a0, a1 = T*T * self.accelerations[index:index + 2]
+        delta = q1 - q0
+        return np.asarray([q0, v0, a0/2,
+            10*delta - 6*v0 - 4*v1 - 1.5*a0 + 0.5*a1,
+            -15*delta + 8*v0 + 7*v1 + 1.5*a0 - a1,
+            6*delta - 3*v0 - 3*v1 - 0.5*a0 + 0.5*a1])
+
+    def evaluate(self, t):
+        if not self.durations.size:
+            zero = np.zeros_like(self.path[0])
+            return self.path[0].copy(), zero, zero
+        index, u = self._segment(t)
+        T = self.durations[index]
+        c = self._coefficients(index)
+        q = c[0] + c[1]*u + c[2]*u**2 + c[3]*u**3 + c[4]*u**4 + c[5]*u**5
+        v = (c[1] + 2*c[2]*u + 3*c[3]*u**2 + 4*c[4]*u**3 + 5*c[5]*u**4)/T
+        a = (2*c[2] + 6*c[3]*u + 12*c[4]*u**2 + 20*c[5]*u**3)/T**2
+        return q, v, a
+
+
+def validate_trajectory(robot, cube, trajectory, samples_per_segment=51):
+    """Reject sampled collisions, grasp drift and joint-limit violations.
+
+    Collision and grasp constraints are nonlinear, so they are checked after
+    the QP rather than claimed as QP constraints. Finite sampling is not a
+    continuous-time collision certificate.
+    """
+    from config import LEFT_HOOK, RIGHT_HOOK
+    from inverse_geometry import _cube_hook_target
+    from tools import collision, setcubeplacement
+    left_id = robot.model.getFrameId(LEFT_HAND)
+    right_id = robot.model.getFrameId(RIGHT_HAND)
+    left_hook = _cube_hook_target(cube, pin.SE3.Identity(), LEFT_HOOK)
+    right_hook = _cube_hook_target(cube, pin.SE3.Identity(), RIGHT_HOOK)
+    max_error, samples = 0.0, 0
+    intervals = list(zip(trajectory.breakpoints[:-1], trajectory.breakpoints[1:]))
+    if not intervals:
+        intervals = [(0.0, 0.0)]
+    for first, last in intervals:
+        for t in np.linspace(first, last, samples_per_segment):
+            q, _, _ = trajectory.evaluate(t)
+            pin.framesForwardKinematics(robot.model, robot.data, q)
+            cube_pose = robot.data.oMf[left_id] * left_hook.inverse()
+            error = float(np.linalg.norm(pin.log6(
+                robot.data.oMf[right_id].inverse() * cube_pose * right_hook).vector))
+            max_error = max(max_error, error)
+            setcubeplacement(robot, cube, cube_pose)
+            if (error >= 0.005 or
+                    np.any(q < robot.model.lowerPositionLimit - 1e-10) or
+                    np.any(q > robot.model.upperPositionLimit + 1e-10) or
+                    collision(robot, q)):
+                raise RuntimeError('Optimized trajectory failed a sampled grasp, joint-limit or collision check')
+            samples += 1
+    return dict(trajectory_samples_checked=samples, max_grasp_residual=max_error)
+
+
 def _reference_at(trajs, tcurrent):
     """Accept this solution's trajectory or the starter tuple of Bezier curves."""
     if hasattr(trajs, "evaluate"):
@@ -117,9 +301,6 @@ def controllaw(sim, robot, trajs, tcurrent, cube):
 # copied into the unchanged course repository without extra modules.
 import argparse
 import json
-from pathlib import Path
-import shutil
-import subprocess
 import sys
 import time
 import pybullet as pb
@@ -192,11 +373,11 @@ class Simulation:
             self.p.disconnect()
 
 
-def run_demo(gui=False, start=None, goal=None, path=None, record=None, q0=None, qe=None):
+def run_demo(gui=False, start=None, goal=None, path=None, q0=None, qe=None,
+             trajectory_method='qp'):
     """Plan, initialise once, then use torque/contact physics until settled.
 
     start/goal are cube SE3 poses; explicit q0/qe override supplied path ends.
-    Recording uses the system ffmpeg executable only; it is not needed to run.
     """
     if gui and sys.platform == 'darwin' and 'ipykernel' in sys.modules:
         raise RuntimeError(
@@ -228,22 +409,16 @@ def run_demo(gui=False, start=None, goal=None, path=None, record=None, q0=None, 
             path[0] = np.asarray(q0, dtype=float).copy()
         if override_goal:
             path[-1] = np.asarray(qe, dtype=float).copy()
-    trajectory = PiecewiseQuinticTrajectory(path)
+    if trajectory_method == 'qp':
+        trajectory = OptimizedTrajectory(path, robot)
+        checked = validate_trajectory(robot, cube, trajectory)
+    elif trajectory_method == 'quintic':
+        trajectory = PiecewiseQuinticTrajectory(path)
+        checked = {}
+    else:
+        raise ValueError("trajectory_method must be 'qp' or 'quintic'")
     sim = Simulation(robot, gui=gui, cube_placement=start)
-    encoder = None
     try:
-        if record:
-            ffmpeg = shutil.which('ffmpeg')
-            if not ffmpeg:
-                raise RuntimeError('Recording requires ffmpeg; omit --record to run without it')
-            target = Path(record)
-            if target.exists():
-                raise FileExistsError(f'Refusing to overwrite video: {target}')
-            target.parent.mkdir(parents=True, exist_ok=True)
-            encoder = subprocess.Popen([ffmpeg, '-v', 'error', '-f', 'rawvideo',
-                '-pix_fmt', 'rgb24', '-s', '640x480', '-r', '25', '-i', '-',
-                '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(target)],
-                stdin=subprocess.PIPE)
         sim.setqsim(path[0])
         max_height = start.translation[2]
         lifted_time = 0.
@@ -255,8 +430,6 @@ def run_demo(gui=False, start=None, goal=None, path=None, record=None, q0=None, 
                       if sim.p.getJointInfo(sim.robot, i)[12].decode().startswith('LARM')}
         right_links = {i for i in range(sim.p.getNumJoints(sim.robot))
                        if sim.p.getJointInfo(sim.robot, i)[12].decode().startswith('RARM')}
-        view = sim.p.computeViewMatrixFromYawPitchRoll([0.25, 0, 1.0], 2.0, 90, -27, 0, 2)
-        projection = sim.p.computeProjectionMatrixFOV(50, 640/480, .05, 10)
         for k in range(int((trajectory.duration + 2.5) / DT)):
             tick_start = time.perf_counter()
             t = k * DT
@@ -281,10 +454,6 @@ def run_demo(gui=False, start=None, goal=None, path=None, record=None, q0=None, 
             # contacts and cube/obstacle impacts are unexpected in this task.
             forbidden_contacts += int(any(sim.p.getContactPoints(a, b) for a, b in (
                 (sim.robot, sim.tableId), (sim.robot, sim.obstacleId), (sim.cubeId, sim.obstacleId))))
-            if encoder is not None and k % 40 == 0:
-                rgba = sim.p.getCameraImage(640, 480, view, projection,
-                                           renderer=sim.p.ER_TINY_RENDERER)[2]
-                encoder.stdin.write(np.asarray(rgba, dtype=np.uint8)[:, :, :3].tobytes())
             if gui:
                 if k % 40 == 0:
                     sim.p.configureDebugVisualizer(sim.p.COV_ENABLE_SINGLE_STEP_RENDERING, 1)
@@ -297,23 +466,26 @@ def run_demo(gui=False, start=None, goal=None, path=None, record=None, q0=None, 
                       forbidden_contact_ticks=forbidden_contacts,
                       joint_limit_violation_ticks=joint_limit_samples,
                       constraints=sim.p.getNumConstraints())
+        result.update(checked)
+        result['trajectory_method'] = trajectory_method
+        if trajectory_method == 'qp':
+            result['qp_reference_objective'] = trajectory.reference_objective
+            result['qp_optimized_objective'] = trajectory.optimized_objective
         result['success'] = bool(target_error < .02 and both_contact_time > 1
                                  and forbidden_contacts == 0 and joint_limit_samples == 0)
         return result
     finally:
         sim.close()
-        if encoder is not None:
-            encoder.stdin.close()
-            if encoder.wait() != 0:
-                raise RuntimeError('Video encoder failed')
 
 
 def main(path=None, q0=None, qe=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--headless', action='store_true')
-    parser.add_argument('--record', help='New .mp4 path; optional ffmpeg is required')
+    parser.add_argument('--trajectory', choices=('qp', 'quintic'), default='qp',
+                        help='Use the QP trajectory (default) or original quintic timing')
     args = parser.parse_args()
-    result = run_demo(gui=not args.headless, record=args.record, path=path, q0=q0, qe=qe)
+    result = run_demo(gui=not args.headless, path=path, q0=q0, qe=qe,
+                      trajectory_method=args.trajectory)
     print(json.dumps(result, indent=2))
     if not result['success']:
         raise SystemExit('Physical carry did not meet the verification thresholds')

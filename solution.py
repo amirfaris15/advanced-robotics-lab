@@ -1,19 +1,17 @@
-"""Shared geometric constants learned by the inverse-geometry solver."""
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Sep  4 11:43:26 2023
 
+@author: stonneau
+"""
+
+from os.path import dirname, join, abspath
 import numpy as np
-import pinocchio as pin
+import pinocchio as pin #the pinocchio library
+from pinocchio.utils import rotate
 
-
-# The value is updated whenever a valid bimanual grasp is found.  It is useful
-# for debugging: while carrying a rigid cube, this hand-to-hand transform is
-# expected to remain constant.
-LMRREF = pin.SE3.Identity()
-RMLREF = pin.SE3.Identity()
-
-
-def remember_hand_relation(left_hand_placement, right_hand_placement):
-    """Store and return the right hand expressed in the left-hand frame."""
-    global LMRREF, RMLREF
-    LMRREF = left_hand_placement.inverse() * right_hand_placement
-    RMLREF = LMRREF.inverse()
-    return LMRREF
+#helpers 
+#if needed, you can store the placement of the right hand in the left hand frame here
+LMRREF = pin.SE3(pin.Quaternion(-0,0, 0, 1 ), np.array(np.array([0, 0, 0])))
+RMLREF = LMRREF.inverse()
