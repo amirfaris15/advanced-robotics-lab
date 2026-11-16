@@ -318,5 +318,5 @@ if __name__ == "__main__":
     path = computepath(q0, qe, CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET, robot, cube)
     print(f"planned {len(path)} grasping configurations")
     open_viewer(viz)
-    displaypath(robot, path, dt=0.05, viz=viz, cube=cube)
+    displaypath(robot, path, dt=0.1, viz=viz, cube=cube)
     keep_viewer_open()
