@@ -1,44 +1,36 @@
 # Advanced Robotics Coursework 2
 
-The Nextage robot grasps a cube with both hands, plans a collision-checked path
-around the obstacle, and carries it in PyBullet. The optional `bonus.py`
-experiment throws the cube towards a random target.
+## DICE setup
 
-## Setup
+Extract the ZIP, then enter the extracted folder containing `environment.yml` (replace the path below with its actual location):
 
-On DICE or another machine with Conda installed, from the project folder:
+```bash
+cd /path/to/extracted/project
+```
+
+If Conda is not initialized in Bash, do this once:
+
+```bash
+/opt/conda/bin/conda init bash
+source ~/.bashrc
+```
+
+Create and activate the project environment:
 
 ```bash
 conda env create -f environment.yml
 conda activate aro2026
 ```
 
-The course environment includes Python 3.11, Pinocchio, Meshcat, PyBullet,
-SciPy and quadprog. Run from this project directory:
+Activate `aro2026` again in each new terminal. If it already exists, update it with `conda env update -f environment.yml`.
 
-```bash
-python inverse_geometry.py  # initial and goal grasps in Meshcat
-python path.py              # grasp-preserving path in Meshcat
-python control.py           # physical carry in a PyBullet window
-python bonus.py             # optional throwing experiment
-```
+## Coursework files
 
-For a non-visual physics check, use `python control.py --headless` or
-`python bonus.py --headless`. Start and goal configurations and a path can be
-edited at the bottom of `control.py`.
+The first three files implement the core grasping, planning, and control tasks described in the coursework brief. `bonus.py` is an optional throwing experiment.
 
-## Methods and limits
+- **`inverse_geometry.py`** — Uses damped Jacobian inverse geometry to align both hands with the cube hooks at the start and target poses. A posture bias favours comfortable configurations, which are checked for joint limits and collisions. Run: `python inverse_geometry.py`
+- **`path.py`** — Implements `computepath` using a projected RRT. It searches for a path around the obstacle, projecting motions to preserve the two-hand grasp and checking for collisions. Shortcutting reduces unnecessary movement before Meshcat displays the result. Run: `python path.py`
+- **`control.py`** — Fits a smooth, timed trajectory to the planned path using a quadratic programme, then uses inverse-dynamics torque control to carry the cube in PyBullet. It reports the final target error, contact time and other simulation results. Run: `python control.py`
+- **`bonus.py`** — Calculates a ballistic throw toward a randomly chosen target and releases the cube in PyBullet. It reports the landing error; some targets may fail the grasp or landing checks. Run: `python bonus.py`
 
-Inverse geometry uses damped Jacobian least squares for both hands, a posture
-bias and collision/joint-limit checks. Path planning uses a projected RRT and
-collision-checked shortcutting. Control uses inverse-dynamics torque tracking;
-a quadratic programme fits a smooth joint trajectory to the planned path.
-Collision and grasp checks along the trajectory use finite samples. The bonus
-calculates a ballistic throw to a random target sampled within 0.03 m in x and
-0.08 m in y of `CUBE_PLACEMENT_TARGET`, then releases the cube by disabling
-robot–cube contacts in the simulator. Some target placements fail IK or the
-landing check.
-
-Local tests have passed headlessly on macOS; DICE has not been verified. A
-PyBullet GUI run may lose its connection on macOS. A successful-run video is
-required alongside this project for coursework submission.
+For Meshcat displays from the first two programs, run `meshcat-server` in a second terminal with `aro2026` activated. To run physics without a window, add `--headless` to `control.py` or `bonus.py`.
