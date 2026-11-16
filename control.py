@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Time parametrisation and inverse-dynamics torque control for CW2."""
-
 import numpy as np
 import pinocchio as pin
 
@@ -9,27 +7,20 @@ from config import LEFT_HAND, RIGHT_HAND
 
 Kp = 300.0
 Kv = 2.0 * np.sqrt(Kp)
-SQUEEZE_FORCE = 8.0  # N per hand, maintained through physical contact
+SQUEEZE_FORCE = 8.0 
 MAX_TORQUE = 180.0
 
-
+#turn path into motion 
 class PiecewiseQuinticTrajectory:
-    """A C2 trajectory that follows every configuration in a planned path.
-
-    A fifth-order smooth-step has zero velocity and acceleration at both ends.
-    Joining one curve per path edge therefore creates a C2 trajectory with a
-    deliberate pause at each RRT waypoint, which is conservative but robust in
-    the contact simulator.
-    """
 
     def __init__(self, path, max_joint_speed=0.40):
         if len(path) < 1:
-            raise ValueError("a trajectory needs at least one configuration")
+            raise ValueError("no configurations in path")
         self.path = [np.asarray(q, dtype=float).copy() for q in path]
         if any(q.ndim != 1 or not np.all(np.isfinite(q)) for q in self.path):
-            raise ValueError("trajectory configurations must be finite vectors")
+            raise ValueError("trajectory configurations not finite")
         if any(q.shape != self.path[0].shape for q in self.path[1:]):
-            raise ValueError("all trajectory configurations must have the same size")
+            raise ValueError("different configuration sizes in path")
         changes = [np.max(np.abs(b - a)) for a, b in zip(self.path[:-1], self.path[1:])]
         if max_joint_speed <= 0:
             raise ValueError("max_joint_speed must be positive")
@@ -47,7 +38,6 @@ class PiecewiseQuinticTrajectory:
         return index, np.clip(local_time / self.durations[index], 0.0, 1.0)
 
     def evaluate(self, t):
-        """Return desired position, velocity and acceleration at time ``t``."""
         if not self.durations.size:
             zeros = np.zeros_like(self.path[0])
             return self.path[0].copy(), zeros, zeros
@@ -63,28 +53,21 @@ class PiecewiseQuinticTrajectory:
             blend_ddot * delta,
         )
 
-
+# trying to smooth the robot instead of stopping at each one 
 class OptimizedTrajectory(PiecewiseQuinticTrajectory):
-    """Fit a C2 quintic trajectory to the path with per-joint QPs.
-
-    Each waypoint has velocity and acceleration variables. Sharing these
-    variables between adjacent segments gives continuous position, velocity
-    and acceleration. The QP balances path fidelity and acceleration, with
-    zero endpoint velocity/acceleration and sampled position/speed limits.
-    """
 
     def __init__(self, path, robot, max_joint_speed=0.40):
         import quadprog
         if not np.isfinite(max_joint_speed) or max_joint_speed <= 0:
-            raise ValueError('max_joint_speed must be finite and positive')
+            raise ValueError('max_joint_speed must be positive')
         super().__init__(path, max_joint_speed=max_joint_speed)
         count = len(self.path)
         dims = self.path[0].size
         if dims != robot.model.nq:
-            raise ValueError('path configurations do not match the robot model')
+            raise ValueError('path configurations do not match the model')
         if any(np.any(q < robot.model.lowerPositionLimit - 1e-10) or
                np.any(q > robot.model.upperPositionLimit + 1e-10) for q in self.path):
-            raise ValueError('path contains a configuration outside joint limits')
+            raise ValueError('path configuration outside joint limits')
         self.velocities = np.zeros((count, dims))
         self.accelerations = np.zeros((count, dims))
         self.reference_objective = 0.0
@@ -155,16 +138,12 @@ class OptimizedTrajectory(PiecewiseQuinticTrajectory):
             residual = A @ result - b
             self.optimized_objective += float(residual @ residual + 1e-6 * (result @ result))
 
-        # Velocity is a quartic polynomial. Its extrema are endpoints and
-        # real roots of its cubic acceleration. Stretch time uniformly if a
-        # peak exceeds the bound; this preserves the geometric path.
         peak = 0.0
         for index, T in enumerate(self.durations):
             coeff = self._coefficients(index)
             for joint in range(dims):
                 c = coeff[:, joint]
-                # A quintic position's extrema lie at the roots of its
-                # quartic velocity. Check all real roots, not just QP samples.
+
                 pos_poly = [5*c[5], 4*c[4], 3*c[3], 2*c[2], c[1]]
                 pos_roots = np.roots(np.trim_zeros(pos_poly, 'f')) if np.any(np.abs(pos_poly) > 1e-14) else []
                 pos_points = [0.0, 1.0] + [float(root.real) for root in pos_roots
@@ -173,7 +152,7 @@ class OptimizedTrajectory(PiecewiseQuinticTrajectory):
                     value = sum(c[k] * u**k for k in range(6))
                     if (value < robot.model.lowerPositionLimit[joint] - 1e-10 or
                             value > robot.model.upperPositionLimit[joint] + 1e-10):
-                        raise RuntimeError(f'QP trajectory crosses joint {joint} limits between samples')
+                        raise RuntimeError(f'QP trajectory exceeds joint limits: {joint}')
                 acc_poly = [20*c[5], 12*c[4], 6*c[3], 2*c[2]]
                 roots = np.roots(np.trim_zeros(acc_poly, 'f')) if np.any(np.abs(acc_poly) > 1e-14) else []
                 points = [0.0, 1.0] + [float(root.real) for root in roots
@@ -211,14 +190,8 @@ class OptimizedTrajectory(PiecewiseQuinticTrajectory):
         a = (2*c[2] + 6*c[3]*u + 12*c[4]*u**2 + 20*c[5]*u**3)/T**2
         return q, v, a
 
-
+# checking if the trajectory is valid with no collision and within joint limits
 def validate_trajectory(robot, cube, trajectory, samples_per_segment=51):
-    """Reject sampled collisions, grasp drift and joint-limit violations.
-
-    Collision and grasp constraints are nonlinear, so they are checked after
-    the QP rather than claimed as QP constraints. Finite sampling is not a
-    continuous-time collision certificate.
-    """
     from config import LEFT_HOOK, RIGHT_HOOK
     from inverse_geometry import _cube_hook_target
     from tools import collision, setcubeplacement
@@ -243,25 +216,18 @@ def validate_trajectory(robot, cube, trajectory, samples_per_segment=51):
                     np.any(q < robot.model.lowerPositionLimit - 1e-10) or
                     np.any(q > robot.model.upperPositionLimit + 1e-10) or
                     collision(robot, q)):
-                raise RuntimeError('Optimized trajectory failed a sampled grasp, joint-limit or collision check')
+                raise RuntimeError('Optimized trajectory failed a sampled grasp. Joint-limit or collision check')
             samples += 1
     return dict(trajectory_samples_checked=samples, max_grasp_residual=max_error)
 
 
 def _reference_at(trajs, tcurrent):
-    """Accept this solution's trajectory or the starter tuple of Bezier curves."""
     if hasattr(trajs, "evaluate"):
         return trajs.evaluate(tcurrent)
     return tuple(trajectory(tcurrent) for trajectory in trajs)
 
-
+#holding the cube 
 def _grasp_wrench_torque(sim, robot, q):
-    """Squeeze opposing faces and support weight through hand joint torques.
-
-    A spring aimed at the exact hook gives zero force when aligned, so it
-    cannot maintain a friction grasp. A small inward force supplies preload.
-    Forces are applied ONLY to robot joints; the cube moves through contacts.
-    """
     position, quaternion = sim.p.getBasePositionAndOrientation(sim.cubeId)
     cube_placement = pin.XYZQUATToSE3(np.asarray([*position, *quaternion]))
     mass = sum(sim.p.getDynamicsInfo(sim.cubeId, i)[0]
@@ -283,12 +249,9 @@ def _grasp_wrench_torque(sim, robot, q):
 
 
 def controllaw(sim, robot, trajs, tcurrent, cube):
-    """Run one computed-torque control step and advance Bullet by one tick."""
     q, vq = sim.getpybulletstate()
     q_desired, v_desired, a_desired = _reference_at(trajs, tcurrent)
 
-    # Inverse dynamics converts the desired closed-loop acceleration into a
-    # torque command.  nle includes gravity, Coriolis and centrifugal terms.
     closed_loop_acceleration = a_desired + Kp * (q_desired - q) + Kv * (v_desired - vq)
     torques = pin.rnea(robot.model, robot.data, q, vq, closed_loop_acceleration)
     torques += _grasp_wrench_torque(sim, robot, q)
@@ -297,8 +260,7 @@ def controllaw(sim, robot, trajs, tcurrent, cube):
 
 
 
-# The simulator and runner live here so the three coursework files can be
-# copied into the unchanged course repository without extra modules.
+
 import argparse
 import json
 import sys
@@ -312,16 +274,12 @@ from config import (NEXTAGE_URDF, TABLE_URDF, OBSTACLE_URDF, CUBE_URDF,
 from setup_pinocchio import setuppinocchio
 from inverse_geometry import computeqgrasppose
 from path import computepath
-
+# the physics simulation 
 class Simulation:
     def __init__(self, robot, gui=False, cube_placement=CUBE_PLACEMENT):
         self.p = BulletClient(connection_mode=pb.GUI if gui else pb.DIRECT)
         if gui:
-            # Bullet's built-in R/Delete shortcuts can erase the scene while
-            # the coursework script is still using its body IDs.
             self.p.configureDebugVisualizer(pb.COV_ENABLE_KEYBOARD_SHORTCUTS, 0)
-            # macOS otherwise redraws expensive panels during every physics
-            # query. The runner explicitly requests only 25 visible frames/s.
             self.p.configureDebugVisualizer(pb.COV_ENABLE_GUI, 0)
             self.p.configureDebugVisualizer(pb.COV_ENABLE_SINGLE_STEP_RENDERING, 1)
         self.p.setAdditionalSearchPath(pybullet_data.getDataPath())
@@ -337,8 +295,6 @@ class Simulation:
                  for i in range(self.p.getNumJoints(self.robot))}
         self.bulletCtrlJointsInPinOrder = [names[n] for n in robot.model.names[1:]]
         self.hand_links = [names['LARM_EFF'], names['RARM_EFF']]
-        # Empty frame links have no physical material. Bullet otherwise assigns
-        # them 1 kg each, unlike Pinocchio; remove only those spurious masses.
         for index in self.hand_links:
             self.p.changeDynamics(self.robot, index, mass=0)
         for index in range(self.p.getNumJoints(self.cubeId)):
@@ -372,18 +328,11 @@ class Simulation:
         if self.p.isConnected():
             self.p.disconnect()
 
-
+#running the task 
 def run_demo(gui=False, start=None, goal=None, path=None, q0=None, qe=None,
              trajectory_method='qp'):
-    """Plan, initialise once, then use torque/contact physics until settled.
-
-    start/goal are cube SE3 poses; explicit q0/qe override supplied path ends.
-    """
     if gui and sys.platform == 'darwin' and 'ipykernel' in sys.modules:
         raise RuntimeError(
-            'PyBullet GUI can freeze inside a macOS Jupyter kernel. '
-            'Run `python control.py` from Terminal to watch the physical carry; '
-            'use run_demo(gui=False) inside Jupyter.'
         )
     start = CUBE_PLACEMENT if start is None else start
     goal = CUBE_PLACEMENT_TARGET if goal is None else goal
@@ -398,13 +347,13 @@ def run_demo(gui=False, start=None, goal=None, path=None, q0=None, qe=None,
     else:
         oke = True
     if not (ok0 and oke):
-        raise RuntimeError('Cannot run: collision-free endpoint IK failed')
+        raise RuntimeError('collision-free endpoint IK failed')
     if path is None:
         path = computepath(q0, qe, start, goal, robot, cube)
     else:
         path = [np.asarray(q, dtype=float).copy() for q in path]
         if not path:
-            raise ValueError('The supplied path must contain at least one configuration')
+            raise ValueError('no configuration in path')
         if override_start:
             path[0] = np.asarray(q0, dtype=float).copy()
         if override_goal:
@@ -416,7 +365,7 @@ def run_demo(gui=False, start=None, goal=None, path=None, q0=None, qe=None,
         trajectory = PiecewiseQuinticTrajectory(path)
         checked = {}
     else:
-        raise ValueError("trajectory_method must be 'qp' or 'quintic'")
+        raise ValueError("trajectory_method not recognized")
     sim = Simulation(robot, gui=gui, cube_placement=start)
     try:
         sim.setqsim(path[0])
@@ -450,8 +399,6 @@ def run_demo(gui=False, start=None, goal=None, path=None, q0=None, qe=None,
             max_tracking_error = max(max_tracking_error, float(np.max(np.abs(ref - q))))
             joint_limit_samples += int(np.any(q < robot.model.lowerPositionLimit - 1e-5)
                                        or np.any(q > robot.model.upperPositionLimit + 1e-5))
-            # The fixed pedestal may touch the floor; only tabletop/obstacle
-            # contacts and cube/obstacle impacts are unexpected in this task.
             forbidden_contacts += int(any(sim.p.getContactPoints(a, b) for a, b in (
                 (sim.robot, sim.tableId), (sim.robot, sim.obstacleId), (sim.cubeId, sim.obstacleId))))
             if gui:
@@ -493,8 +440,6 @@ def main(path=None, q0=None, qe=None):
 
 
 if __name__ == '__main__':
-    # Set these to explicit configurations or a list of configurations to
-    # experiment. None asks the code to calculate that value automatically.
     q0 = None
     qe = None
     path = None

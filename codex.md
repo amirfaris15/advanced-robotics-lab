@@ -16,12 +16,13 @@ sampled; it is not a continuous collision guarantee. The previous quintic
 interpolation remains available with `--trajectory quintic`.
 The control runner does not include video recording or an ffmpeg dependency.
 
-`bonus.py` is the original throwing experiment from `origin/bonus-folder`;
-its simulation import points to `control.Simulation` because this worktree has
-no `simulation.py`, and its grasp-wrench call uses that controller's signature.
-It retains its original random-target and quintic approach
-and can fail for particular target samples. Test the bonus independently of
-the default QP carry; preserve the three coursework-file submission rules.
+`bonus.py` is the throwing experiment from `origin/bonus-folder`; its
+simulation import points to `control.Simulation` because this worktree has no
+`simulation.py`, and its grasp-wrench call uses that controller's signature.
+It samples target offsets uniformly within ±0.03 m in x and ±0.08 m in y of
+`CUBE_PLACEMENT_TARGET`, uses a quintic approach, and can fail for particular
+target samples. Test the bonus independently of the default QP carry; preserve
+the three coursework-file submission rules.
 
 After control changes, check both the default and a changed reachable goal in
 headless PyBullet, check waypoint interpolation, joint limits, grasp/collision

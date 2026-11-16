@@ -34,9 +34,10 @@ bias and collision/joint-limit checks. Path planning uses a projected RRT and
 collision-checked shortcutting. Control uses inverse-dynamics torque tracking;
 a quadratic programme fits a smooth joint trajectory to the planned path.
 Collision and grasp checks along the trajectory use finite samples. The bonus
-calculates a ballistic throw to a random target and releases the cube by
-disabling robot–cube contacts in the simulator. Some target placements fail IK
-or the landing check.
+calculates a ballistic throw to a random target sampled within 0.03 m in x and
+0.08 m in y of `CUBE_PLACEMENT_TARGET`, then releases the cube by disabling
+robot–cube contacts in the simulator. Some target placements fail IK or the
+landing check.
 
 Local tests have passed headlessly on macOS; DICE has not been verified. A
 PyBullet GUI run may lose its connection on macOS. A successful-run video is

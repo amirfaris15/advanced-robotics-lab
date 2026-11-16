@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Collision-checked bimanual inverse geometry for Coursework 2."""
 
 import numpy as np
 import pinocchio as pin
 
 from config import EPSILON, LEFT_HAND, LEFT_HOOK, RIGHT_HAND, RIGHT_HOOK
 from tools import collision, jointlimitsviolated, projecttojointlimits, setcubeplacement
+
+# viewer using Meshcat
 def setup_viewer():
-    """Use an existing Meshcat server, or start one when none responds."""
     import zmq
     from config import MESHCAT_URL
     from tools import setupwithmeshcat
@@ -43,14 +43,12 @@ def keep_viewer_open():
 
 
 def _cube_hook_target(cube, cube_placement, hook_name):
-    """Return a hook's world pose without mutating its geometry placement."""
     pin.framesForwardKinematics(cube.model, cube.data, cube.q0)
     hook_id = cube.model.getFrameId(hook_name)
     return cube_placement * cube.data.oMf[hook_id]
 
-
+# Jacobian and caculating how far the robot is from the target 
 def _pose_error_and_jacobian(robot, q, targets):
-    """Stack the two 6-D local SE(3) errors and their matching Jacobians."""
     pin.computeJointJacobians(robot.model, robot.data, q)
     pin.framesForwardKinematics(robot.model, robot.data, q)
 
@@ -58,8 +56,6 @@ def _pose_error_and_jacobian(robot, q, targets):
     for frame_name, target in targets:
         frame_id = robot.model.getFrameId(frame_name)
         current = robot.data.oMf[frame_id]
-        # log6(current^-1 target) is a 6-D body displacement taking the hand
-        # from its current pose to the matching cube hook.
         errors.append(pin.log6(current.inverse() * target).vector)
         jacobians.append(
             pin.getFrameJacobian(robot.model, robot.data, frame_id, pin.ReferenceFrame.LOCAL)
@@ -68,13 +64,11 @@ def _pose_error_and_jacobian(robot, q, targets):
 
 
 def _damped_least_squares(jacobian, error, damping):
-    """Solve J dq = error robustly near a singular arm configuration."""
     jj_t = jacobian @ jacobian.T
     return jacobian.T @ np.linalg.solve(jj_t + damping * np.eye(jj_t.shape[0]), error)
 
-
+    #checking how good the grasp is 
 def _grasp_residual(robot, cube, q, cube_placement):
-    """Measure the full two-hand SE(3) error for a candidate grasp."""
     targets = (
         (LEFT_HAND, _cube_hook_target(cube, cube_placement, LEFT_HOOK)),
         (RIGHT_HAND, _cube_hook_target(cube, cube_placement, RIGHT_HOOK)),
@@ -82,14 +76,8 @@ def _grasp_residual(robot, cube, q, cube_placement):
     error, _ = _pose_error_and_jacobian(robot, q, targets)
     return float(np.linalg.norm(error))
 
-
+    # display the robot and cube 
 def display_grasp(robot, cube, q, viz, cube_placement=None):
-    """Draw the robot, carried cube and frame markers in one consistent pose.
-
-    When no explicit cube pose is supplied, infer it from the left hand:
-    world_T_cube = world_T_hand * inverse(cube_T_hook). This is geometric
-    playback of an already planned grasp, not a physical Bullet simulation.
-    """
     pin.framesForwardKinematics(robot.model, robot.data, q)
     if cube_placement is None:
         cube_to_hook = _cube_hook_target(cube, pin.SE3.Identity(), LEFT_HOOK)
@@ -105,9 +93,8 @@ def display_grasp(robot, cube, q, viz, cube_placement=None):
             hand_name + "HookFrame", _cube_hook_target(cube, cube_placement, hook_name)
         )
 
-
+    # Solver: repeating small steps until both hand reach the target 
 def _solve_grasp(robot, q_start, targets, posture, max_iterations, tolerance):
-    """Run redundant, two-hand IK from one seed and return ``(q, success)``."""
     q = np.asarray(q_start, dtype=float).copy()
     posture = np.asarray(posture, dtype=float)
     if (q.ndim != 1 or posture.ndim != 1 or q.shape != posture.shape or
@@ -124,13 +111,9 @@ def _solve_grasp(robot, q_start, targets, posture, max_iterations, tolerance):
             return q, True
 
         primary_step = _damped_least_squares(jacobian, error, damping)
-        # The null space leaves the hand task unchanged to first order.  It
-        # biases the redundant torso/arms back to a comfortable configuration.
         null_space = np.eye(robot.model.nv) - np.linalg.pinv(jacobian) @ jacobian
         posture_step = null_space @ pin.difference(robot.model, q, posture)
         velocity = primary_step + 0.08 * posture_step
-        # A bounded integration step prevents a single poor linearisation from
-        # jumping through joint limits.
         scale = max(1.0, np.linalg.norm(velocity) / 0.20)
         q = pin.integrate(robot.model, q, velocity / scale)
         q = projecttojointlimits(robot, q)
@@ -138,9 +121,8 @@ def _solve_grasp(robot, q_start, targets, posture, max_iterations, tolerance):
     error, _ = _pose_error_and_jacobian(robot, q, targets)
     return q, np.linalg.norm(error) < tolerance
 
-
+#sequence of starting pose 
 def _restart_postures(robot, qcurrent, count=12):
-    """Yield deterministic, legal posture references for IK restarts."""
     qcurrent = projecttojointlimits(robot, qcurrent)
     yield qcurrent
     yield projecttojointlimits(robot, robot.q0.copy())
@@ -148,23 +130,15 @@ def _restart_postures(robot, qcurrent, count=12):
     rng = np.random.default_rng(2026)
     lower, upper = robot.model.lowerPositionLimit, robot.model.upperPositionLimit
     for _ in range(count):
-        # Mild perturbations retain a human-like folded-arm posture much better
-        # than sampling the full joint box.
         candidate = robot.q0 + rng.normal(0.0, 0.35, size=robot.model.nq)
         yield np.minimum(np.maximum(candidate, lower), upper)
 
-
+#return the pose that grabs the cube (L hook and R hook) or return original if fails
 def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
-    """Return ``(q, success)`` for a collision-free grasp at ``cubetarget``.
-
-    Both end effectors are constrained in position *and* orientation to their
-    corresponding cube hooks.  No fixed joint values or hard-coded cube poses
-    are used, so this also supports a perturbed initial/target cube placement.
-    """
     qcurrent = np.asarray(qcurrent, dtype=float)
     if (qcurrent.ndim != 1 or qcurrent.size != robot.model.nq or
             not np.all(np.isfinite(qcurrent))):
-        raise ValueError("qcurrent must be a finite robot configuration")
+        raise ValueError("qcurrent error")
     setcubeplacement(robot, cube, cubetarget)
     targets = (
         (LEFT_HAND, _cube_hook_target(cube, cubetarget, LEFT_HOOK)),
@@ -175,9 +149,6 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
         q, converged = _solve_grasp(
             robot, posture, targets, posture, max_iterations=250, tolerance=5 * EPSILON
         )
-        # Re-evaluate the residual after the final integration and limit
-        # projection.  This guards against accepting a numerically converged
-        # step whose projection moved it outside the requested grasp tolerance.
         if (converged and
                 _grasp_residual(robot, cube, q, cubetarget) < 5 * EPSILON and
                 not jointlimitsviolated(robot, q) and not collision(robot, q)):
@@ -185,8 +156,6 @@ def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
                 viz.display(q)
             return q, True
 
-    # Returning the caller's valid seed makes failure explicit without
-    # accidentally commanding an arbitrary configuration in the simulator.
     return qcurrent.copy(), False
 
 
