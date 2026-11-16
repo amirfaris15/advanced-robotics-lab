@@ -15,12 +15,12 @@ class PiecewiseQuinticTrajectory:
 
     def __init__(self, path, max_joint_speed=0.40):
         if len(path) < 1:
-            raise ValueError("a trajectory needs at least one configuration")
+            raise ValueError("no configurations in path")
         self.path = [np.asarray(q, dtype=float).copy() for q in path]
         if any(q.ndim != 1 or not np.all(np.isfinite(q)) for q in self.path):
-            raise ValueError("trajectory configurations must be finite vectors")
+            raise ValueError("trajectory configurations not finite")
         if any(q.shape != self.path[0].shape for q in self.path[1:]):
-            raise ValueError("all trajectory configurations must have the same size")
+            raise ValueError("different configuration sizes in path")
         changes = [np.max(np.abs(b - a)) for a, b in zip(self.path[:-1], self.path[1:])]
         if max_joint_speed <= 0:
             raise ValueError("max_joint_speed must be positive")
@@ -59,15 +59,15 @@ class OptimizedTrajectory(PiecewiseQuinticTrajectory):
     def __init__(self, path, robot, max_joint_speed=0.40):
         import quadprog
         if not np.isfinite(max_joint_speed) or max_joint_speed <= 0:
-            raise ValueError('max_joint_speed must be finite and positive')
+            raise ValueError('max_joint_speed must be positive')
         super().__init__(path, max_joint_speed=max_joint_speed)
         count = len(self.path)
         dims = self.path[0].size
         if dims != robot.model.nq:
-            raise ValueError('path configurations do not match the robot model')
+            raise ValueError('path configurations do not match the model')
         if any(np.any(q < robot.model.lowerPositionLimit - 1e-10) or
                np.any(q > robot.model.upperPositionLimit + 1e-10) for q in self.path):
-            raise ValueError('path contains a configuration outside joint limits')
+            raise ValueError('path configuration outside joint limits')
         self.velocities = np.zeros((count, dims))
         self.accelerations = np.zeros((count, dims))
         self.reference_objective = 0.0
@@ -152,7 +152,7 @@ class OptimizedTrajectory(PiecewiseQuinticTrajectory):
                     value = sum(c[k] * u**k for k in range(6))
                     if (value < robot.model.lowerPositionLimit[joint] - 1e-10 or
                             value > robot.model.upperPositionLimit[joint] + 1e-10):
-                        raise RuntimeError(f'QP trajectory crosses joint {joint} limits between samples')
+                        raise RuntimeError(f'QP trajectory exceeds joint limits: {joint}')
                 acc_poly = [20*c[5], 12*c[4], 6*c[3], 2*c[2]]
                 roots = np.roots(np.trim_zeros(acc_poly, 'f')) if np.any(np.abs(acc_poly) > 1e-14) else []
                 points = [0.0, 1.0] + [float(root.real) for root in roots
@@ -216,7 +216,7 @@ def validate_trajectory(robot, cube, trajectory, samples_per_segment=51):
                     np.any(q < robot.model.lowerPositionLimit - 1e-10) or
                     np.any(q > robot.model.upperPositionLimit + 1e-10) or
                     collision(robot, q)):
-                raise RuntimeError('Optimized trajectory failed a sampled grasp, joint-limit or collision check')
+                raise RuntimeError('Optimized trajectory failed a sampled grasp. Joint-limit or collision check')
             samples += 1
     return dict(trajectory_samples_checked=samples, max_grasp_residual=max_error)
 
@@ -347,13 +347,13 @@ def run_demo(gui=False, start=None, goal=None, path=None, q0=None, qe=None,
     else:
         oke = True
     if not (ok0 and oke):
-        raise RuntimeError('Cannot run: collision-free endpoint IK failed')
+        raise RuntimeError('collision-free endpoint IK failed')
     if path is None:
         path = computepath(q0, qe, start, goal, robot, cube)
     else:
         path = [np.asarray(q, dtype=float).copy() for q in path]
         if not path:
-            raise ValueError('The supplied path must contain at least one configuration')
+            raise ValueError('no configuration in path')
         if override_start:
             path[0] = np.asarray(q0, dtype=float).copy()
         if override_goal:
@@ -365,7 +365,7 @@ def run_demo(gui=False, start=None, goal=None, path=None, q0=None, qe=None,
         trajectory = PiecewiseQuinticTrajectory(path)
         checked = {}
     else:
-        raise ValueError("trajectory_method must be 'qp' or 'quintic'")
+        raise ValueError("trajectory_method not recognized")
     sim = Simulation(robot, gui=gui, cube_placement=start)
     try:
         sim.setqsim(path[0])

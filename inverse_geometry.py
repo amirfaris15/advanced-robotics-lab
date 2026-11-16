@@ -133,12 +133,12 @@ def _restart_postures(robot, qcurrent, count=12):
         candidate = robot.q0 + rng.normal(0.0, 0.35, size=robot.model.nq)
         yield np.minimum(np.maximum(candidate, lower), upper)
 
-#return the pose that grabs the cube or return original if fails 
+#return the pose that grabs the cube (L hook and R hook) or return original if fails
 def computeqgrasppose(robot, qcurrent, cube, cubetarget, viz=None):
     qcurrent = np.asarray(qcurrent, dtype=float)
     if (qcurrent.ndim != 1 or qcurrent.size != robot.model.nq or
             not np.all(np.isfinite(qcurrent))):
-        raise ValueError("qcurrent must be a finite robot configuration")
+        raise ValueError("qcurrent error")
     setcubeplacement(robot, cube, cubetarget)
     targets = (
         (LEFT_HAND, _cube_hook_target(cube, cubetarget, LEFT_HOOK)),

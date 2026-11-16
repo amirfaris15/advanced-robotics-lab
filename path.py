@@ -32,7 +32,7 @@ def _cube_distance(first, second):
     rotation = np.linalg.norm(pin.log3(first.rotation.T @ second.rotation))
     return translation + 0.10 * rotation
 
-#move the cube from stat to end in small steps, check if it can be done without collision or limit violation
+#move the cube from start to end in small steps, check if it can be done without collision or limit violation
 def _project_segment(robot, cube, q_start, cube_start, cube_end, step=0.025):
     distance = _cube_distance(cube_start, cube_end)
     samples = max(1, int(np.ceil(distance / step)))
@@ -47,7 +47,7 @@ def _project_segment(robot, cube, q_start, cube_start, cube_end, step=0.025):
         q_previous = q_next
     return path, True
 
-#random cube position sampling, within bounds
+#random cube position sampling for rrt, within bounds
 def _sample_cube_pose(rng, start, goal):
     lo = np.minimum(start.translation, goal.translation) - np.array([0.04, 0.05, 0.0])
     hi = np.maximum(start.translation, goal.translation) + np.array([0.04, 0.05, 0.0])
@@ -69,7 +69,7 @@ def _sample_cube_pose(rng, start, goal):
     rotation = _interpolate_pose(start, goal, rng.uniform()).rotation
     return pin.SE3(rotation, translation)
 
-# make sure the path end at the goal 
+# make sure the path ends at the goal
 def _finish_at_goal(robot, cube, path, qgoal, goal_pose):
     if not path:
         return None
@@ -103,24 +103,24 @@ def _finish_at_goal(robot, cube, path, qgoal, goal_pose):
 
 def projectpath(robot, cube, q_start, cube_start, cube_end, step=0.025):
     if step <= 0:
-        raise ValueError("step must be positive")
+        raise ValueError("step less than zero")
     q_start = np.asarray(q_start, dtype=float)
     if q_start.ndim != 1 or not np.all(np.isfinite(q_start)):
-        raise ValueError("q_start must be a finite one-dimensional configuration")
+        raise ValueError("q_start error")
     return _project_segment(robot, cube, q_start, cube_start, cube_end, step)
 
-
+# smooth the path by removing detours, but only if the shortcut is valid
 def smoothpath(robot, cube, nodes, chain, rng=None, attempts=80):
     if not chain:
-        raise ValueError("chain must contain at least one node")
+        raise ValueError("chain has no nodes")
     if attempts < 0:
-        raise ValueError("attempts must be non-negative")
+        raise ValueError("attempts less than zero")
     if rng is None:
         rng = np.random.default_rng(15)
     smoothed = _shortcut_chain(robot, cube, nodes, chain, rng, attempts)
     projected = _project_chain(robot, cube, nodes, smoothed)
     if projected is None:
-        raise RuntimeError("smoothed chain could not be re-projected")
+        raise RuntimeError("smoothed chain error")
     return projected
 
 
@@ -177,14 +177,14 @@ def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal, robot=None, c
     qinit, qgoal = np.asarray(qinit, dtype=float), np.asarray(qgoal, dtype=float)
     setcubeplacement(robot, cube, cubeplacementq0)
     if qinit.ndim != 1 or qgoal.ndim != 1 or qinit.shape != qgoal.shape:
-        raise ValueError("qinit and qgoal must be same-size configuration vectors")
+        raise ValueError("qinit and qgoal size mismatch")
     if not np.all(np.isfinite(qinit)) or not np.all(np.isfinite(qgoal)):
         raise ValueError("qinit and qgoal must be finite")
     if jointlimitsviolated(robot, qinit) or collision(robot, qinit):
-        raise ValueError("qinit is invalid; compute a valid grasp before planning")
+        raise ValueError("qinit is invalid")
     setcubeplacement(robot, cube, cubeplacementqgoal)
     if jointlimitsviolated(robot, qgoal) or collision(robot, qgoal):
-        raise ValueError("qgoal is invalid; compute a valid grasp before planning")
+        raise ValueError("qgoal is invalid")
 
     nodes = [_Node(cubeplacementq0, qinit, None)]
     rng = np.random.default_rng(15)  
@@ -227,7 +227,7 @@ def computepath(qinit, qgoal, cubeplacementq0, cubeplacementqgoal, robot=None, c
         if completed is not None:
             return completed
 
-    raise RuntimeError("RRT could not find a valid path within 500 expansions")
+    raise RuntimeError("RRT could not find a valid path within 500 tries")
 
 
 def displaypath(robot, path, dt, viz, cube=None):
@@ -247,7 +247,7 @@ if __name__ == "__main__":
     q0, initial_ok = computeqgrasppose(robot, robot.q0, cube, CUBE_PLACEMENT, viz)
     qe, final_ok = computeqgrasppose(robot, q0, cube, CUBE_PLACEMENT_TARGET, viz)
     if not (initial_ok and final_ok):
-        raise RuntimeError("Cannot plan because one grasping configuration failed")
+        raise RuntimeError("Grasping configuration failed")
     path = computepath(q0, qe, CUBE_PLACEMENT, CUBE_PLACEMENT_TARGET, robot, cube)
     print(f"planned {len(path)} grasping configurations")
     open_viewer(viz)
