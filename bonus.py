@@ -20,6 +20,7 @@ LIFT = 0.12
 ARC_CLEARANCE = 0.12
 STROKE_TIME = 0.04
 
+# Pick a random landing spot near the configured goal
 def random_target():
     rng = np.random.default_rng()
     target = CUBE_PLACEMENT_TARGET.copy()
@@ -33,6 +34,7 @@ def random_target():
 
 TARGET = random_target()
 
+# Calculate the launch velocity needed to reach the target on an arc
 def gravity_throw_velocity(start, target):
     peak = max(start.translation[2], target.translation[2]) + ARC_CLEARANCE
     vz = np.sqrt(2.0 * GRAVITY * (peak - start.translation[2]))
@@ -42,6 +44,7 @@ def gravity_throw_velocity(start, target):
     velocity[2] = vz
     return velocity, flight_time
 
+# Solve IK along the launch stroke so both hands keep their grip
 def solve_along_segment(robot, cube, q_start, pose_start, pose_end, step=0.035):
     distance = np.linalg.norm(pose_end.translation - pose_start.translation)
     count = max(1, int(np.ceil(distance / step)))
@@ -55,6 +58,7 @@ def solve_along_segment(robot, cube, q_start, pose_start, pose_end, step=0.035):
             return None
     return q
 
+# Move both hands outward before releasing the cube
 def open_hands(robot, q, cube_pose):
     pin.framesForwardKinematics(robot.model, robot.data, q)
     outward = cube_pose.rotation[:, 1]
@@ -66,6 +70,7 @@ def open_hands(robot, q, cube_pose):
     q_open, success = _solve_grasp(robot, q, targets, q, 180, 5e-3)
     return q_open if success else q.copy()
 
+# Build the short joint trajectory that gives the cube its launch speed
 def throw_trajectory(q0, q1, duration):
     def evaluate(t):
         delta = q1 - q0
@@ -79,6 +84,7 @@ def throw_trajectory(q0, q1, duration):
         return h0 * q0 + h1 * q1, dh0 * q0 + dh1 * q1, ddh0 * q0 + ddh1 * q1
     return evaluate
 
+# Use the desired motion to calculate and apply joint torques
 def torque_step(sim, robot, cube, q_desired, v_desired, a_desired, grasping):
     q, vq = sim.getpybulletstate()
     acceleration = a_desired + Kp * (q_desired - q) + Kv * (v_desired - vq)
@@ -88,11 +94,13 @@ def torque_step(sim, robot, cube, q_desired, v_desired, a_desired, grasping):
     limits = np.minimum(MAX_TORQUE, robot.model.effortLimit)
     sim.step(np.clip(torque, -limits, limits).tolist())
 
+#  remove collision between the robot and cube
 def release_cube(sim):
     for robot_link in range(-1, sim.p.getNumJoints(sim.robot)):
         for cube_link in range(-1, sim.p.getNumJoints(sim.cubeId)):
             sim.p.setCollisionFilterPair(sim.robot, sim.cubeId, robot_link, cube_link, 0)
 
+# make a red cross at the target location
 def draw_target(sim):
     point = TARGET.translation
     top = point + np.array([0.0, 0.0, 0.05])
@@ -101,6 +109,7 @@ def draw_target(sim):
     sim.p.addUserDebugLine((top + [-0.06, 0.0, 0.0]).tolist(), (top + [0.06, 0.0, 0.0]).tolist(), red, lineWidth=3)
     sim.p.addUserDebugLine((top + [0.0, -0.06, 0.0]).tolist(), (top + [0.0, 0.06, 0.0]).tolist(), red, lineWidth=3)
 
+# Plan the approach, launch the cube, and check where it lands.
 def run_throw(gui=False):
     robot, _, _, cube = setuppinocchio()
     print(f"Random target: {TARGET.translation.tolist()}", flush=True)
