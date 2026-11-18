@@ -1,3 +1,7 @@
+# Local submission builds and recordings
+/artifacts/
+.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
