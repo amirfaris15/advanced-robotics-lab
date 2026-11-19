@@ -60,12 +60,16 @@ def _sample_cube_pose(rng, start, goal):
 
     x0, x1 = bounded_interval(lo[0], hi[0], 0.18, 0.65)
     y0, y1 = bounded_interval(lo[1], hi[1], -0.55, 0.45)
-    translation = np.array([
-        rng.uniform(x0, x1),
-        rng.uniform(y0, y1),
-        rng.uniform(min(start.translation[2], goal.translation[2]) + 0.16,
-                    max(start.translation[2], goal.translation[2]) + 0.20),
-    ])
+    x = rng.uniform(x0, x1)
+    y = rng.uniform(y0, y1)
+    height_sample = rng.uniform()
+    split_height = lo[2] + 0.16
+    max_height = hi[2] + 0.20
+    if height_sample < 0.5:
+        z = lo[2] + 0.16 * (2 * height_sample)
+    else:
+        z = split_height + (max_height - split_height) * (2 * height_sample - 1)
+    translation = np.array([x, y, z])
     rotation = _interpolate_pose(start, goal, rng.uniform()).rotation
     return pin.SE3(rotation, translation)
 
